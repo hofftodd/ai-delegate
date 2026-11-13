@@ -1,10 +1,11 @@
 # ai-delegate: design
 
-Status: design only, 2026-11-10. Nothing is built yet.
+Status: M1, M2 and M3 built 2026-11-13 (the Houtini trial was skipped). Written 2026-11-10;
+where the build departed from this design, the section says so.
 
 ## Purpose and scope
 
-ai-delegate is a planned fifth tool in the suite: an MCP server that lets Claude Code hand bounded work to the local models behind ai-swap, while Claude keeps the planning and the final say. It is a future project; nothing is built yet, and a trial of an existing server (Houtini LM) comes first.
+ai-delegate is a planned fifth tool in the suite: an MCP server that lets Claude Code hand bounded work to the local models behind ai-swap, while Claude keeps the planning and the final say. M1 is built; the Houtini trial was skipped in favour of trialling M1 itself (see Evaluation plan).
 
 - In scope: short questions and reviews answered by a local model, and delegated coding jobs that run in a throwaway copy of the repo and come back as a diff.
 - Out of scope: running Claude Code itself on a local model (`claude-swap` already does that), and multi-task orchestration (that is ai-factory).
@@ -39,7 +40,7 @@ Six tools in two groups: quick calls that answer within one MCP request, and del
 
 Claude decides what to delegate; a skill shipped with the server says when delegation pays (mechanical edits, boilerplate, first drafts of tests) and when it doesn't (design, anything needing the whole conversation).
 
-- Open question: whether `review` earns its own tool or is `ask` with a preset prompt.
+- Open question: whether `review` earns its own tool or is `ask` with a preset prompt. M1 makes it a tool: its own system prompt, temperature 0.2, and `git diff` ranges read by the server.
 
 ## Architecture
 
@@ -50,7 +51,7 @@ flowchart LR
     subgraph local["Your machine, where Claude Code runs"]
         cc["Claude Code<br/>plans, delegates, reviews, applies the diff"]
         ad["ai-delegate (new)<br/>stdio MCP server: tools, routing, jobs<br/>gateway: budgets, loop stop, no keys inside"]
-        sb["Job sandbox, one per delegated job<br/>pi in Docker, in its own git worktree<br/>returns a diff; never edits in place"]
+        sb["Job sandbox, one per delegated job<br/>pi in Docker, in its own clone of the repo<br/>returns a diff; never edits in place"]
         cc <-->|MCP over stdio| ad
         ad <-->|jobs; pi's model calls| sb
     end
@@ -86,11 +87,12 @@ This is the same swap-avoidance idea as ai-factory's residency rules, read from 
 
 ## Delegation safety
 
-A delegated job never touches the user's working tree: it works in its own git worktree and hands back a diff that Claude decides whether to apply.
+A delegated job never touches the user's working tree: it works in its own copy of the repo and hands back a diff that Claude decides whether to apply.
 
-- **Worktree per job.** `git worktree add` on a new branch from the current HEAD, including uncommitted changes the caller asks for. Removed when the result is collected or the job is discarded.
+- **A clone per job (built; was "worktree per job").** A `git worktree`'s `.git` is a file pointing into the caller's `.git`, a path that doesn't exist inside the container, so git would fail there. Each job instead gets a `git clone --local` (objects hard-linked, so cheap) at HEAD plus the caller's uncommitted changes by default, committed in the clone as the job's base. It adds no branches to the caller's repo, and its `origin` is removed. It is kept until the job is discarded.
 - **Diff back, not edits in place.** `job_result` returns the diff and the commands to apply it; Claude reviews it like any other change.
-- **Sandbox by default.** The agent (pi) runs in a Docker container with only the worktree mounted, reusing ai-factory's executor image and gateway pattern: the model is reached only through a local gateway that counts calls and tokens and stops loops. A no-Docker mode runs pi directly in the worktree, for machines without Docker, and says so.
+- **Sandbox by default (built).** Two levels. `docker` (the default): pi runs in a container with only the clone mounted, reusing ai-factory's executor image. The container is on an internal Docker network whose only other member is a relay (socat) to this process's gateway, so the agent reaches its model and nothing else. `local`: pi runs as a host process in the clone, with no isolation; results say so. A repo's toolchain comes from `.ai-delegate/Dockerfile` (or ai-factory's `.ai-factory/Dockerfile`), built once and cached by hash, because the base image has no language runtimes.
+- **Possible middle level (not built):** `local` under macOS `sandbox-exec` (Seatbelt), limiting writes to the clone and network to the gateway, while keeping the host's toolchains.
 - **Budgets.** Per job: wall-clock limit, model calls, new tokens (counted as in ai-factory#18), and changed lines. Hitting one ends the job with what it got so far.
 - **No secrets in the sandbox.** Node API keys stay on the host side of the gateway, as in ai-factory.
 
@@ -128,15 +130,19 @@ Before building anything, use Houtini LM against ai-swap for a few days of real 
 
 Each milestone is usable on its own; the trial decides whether the later ones happen.
 
-1. **Trial:** Houtini LM against ai-swap, with notes (Evaluation plan). Gate: the build criteria are met.
-2. **M1, quick tools:** `models`, `ask`, `review` over stdio, with swap-aware routing from ai-swap's status. Replaces Houtini for daily use.
-3. **M2, delegation:** `delegate`, `job_status`, `job_result` with a worktree per job and pi in the sandbox; budgets and the diff-back flow.
-4. **M3, measured routing and the skill:** model lists generated from ai-bench results, and the Claude Code skill that says when to delegate.
+1. **Trial:** skipped 2026-11-13; M1 was built directly, and the trial notes are kept on M1 instead. The gate for M2 is unchanged: the build criteria are met.
+2. **M1, quick tools (built):** `models`, `ask`, `review` over stdio, with swap-aware routing from ai-swap's status.
+3. **M2, delegation (built):** `delegate`, `job_status`, `job_result`, plus `job_cancel` and `job_discard`, with a clone per job and pi in the sandbox; budgets and the diff-back flow. The gateway is a lean copy of ai-factory's (pinning the model, counting calls and new tokens, stopping repeats), not a shared library: ai-factory's is bound to its database.
+4. **M3, measured routing and the skill (built):** `ai-delegate routes --write` ranks pinned copies (`model@machine`) per tool from ai-bench's per-machine tables into `routes.yaml`, matching on engine, with a name map for the rest. `skills/ai-delegate/SKILL.md` (installed with `ai-delegate skill`) says when to delegate.
+
+5. **After M3 (built 2026-11-13):** `research` (read-only codebase research with citation checking), `job_revise` (another attempt in the same clone, with feedback), `feedback` (outcomes: kept, fixed, redone, unused), and `capabilities` (a live planning briefing). Tool calls feed a token ledger: what each call cost Claude against an estimate of the native cost, net of results rated redone or unused. The server instructions and the skill make saving Claude's tokens part of its goal. The evaluation plan's notes are now `feedback` plus `ai-delegate stats`.
 
 Open questions:
 
-- [ ] Python (shares ai-factory's pi and gateway code) or TypeScript (the MCP ecosystem's default)?
+- [x] Python (shares ai-factory's pi and gateway code) or TypeScript (the MCP ecosystem's default)? Python, with the official `mcp` SDK (2.x).
+- [ ] Is the native-cost estimate good enough? It counts what Claude would have read (files, diffs, what a local agent read), not the reasoning it would also have done. Compare it with real sessions' token use once there are some.
+- [ ] Web research for local models: port ai-factory's `research.py` (SearXNG search, public-only fetch) once a SearXNG instance runs on the LAN.
 - [ ] Should the quick tools also be served by ai-swap itself as an HTTP MCP endpoint, so any machine can use them without installing ai-delegate?
-- [ ] How much of ai-factory's sandbox and gateway can be shared as a library rather than copied?
-- [ ] Does a delegated job need the conversation's context, or only the task text and the repo?
+- [x] How much of ai-factory's sandbox and gateway can be shared as a library rather than copied? Little as things stand: its gateway and runtime are bound to its database and settings. M2 copies the patterns (gateway accounting, pi flags and event parsing, network relay) and reuses the executor image as is.
+- [x] Does a delegated job need the conversation's context, or only the task text and the repo? Built with only the task, done-when, test command and the repo; the skill tells Claude to make the brief complete. Revisit if jobs fail for lack of context.
 - [ ] What MCP tool-call time limit does Claude Code apply, and is it configurable, for `ask` on slow models?

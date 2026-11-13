@@ -1,0 +1,59 @@
+# ~/.config/ai-delegate/config.yaml. Every key is optional; these are the defaults, except
+# the model lists: without them, routes.yaml (generated from ai-bench) is used.
+
+# The ai-swap endpoint. Any machine's works: ai-swap forwards to the machine with the model.
+# AI_DELEGATE_ENDPOINT overrides it.
+endpoint: http://studio.local:8080
+
+# Candidate models per tool, best first. A name matches a model's id, name or alias on any
+# machine ("flint" matches both copies; "flint@mini-ubuntu" only that one). A loaded candidate
+# wins over a better-ranked one that would have to load; a reserved machine is skipped.
+# Setting models here overrides routes.yaml for that tool.
+ask:
+  # models: [flint, deepseek-v4-flash, nemotron-3.5-lightning-30b-a3b, qwen3.8-27b]
+  timeout_s: 300
+review:
+  # models: [thinkingcap-qwen3.8-27b, deepseek-v4-flash, flint, qwen3.8-27b]
+  timeout_s: 600
+
+# Files and diffs sent with one call, in bytes.
+max_input_bytes: 400000
+# Output budget per reply: a quarter of the model's context, capped here (ai-factory#16).
+max_output_tokens: 32768
+
+# Delegated jobs and research. Candidates, as for ask and review (routes --write
+# generates them).
+delegate:
+  # models: [flint, deepseek-v4-flash, qwen3.8-27b]
+research:
+  # models: [deepseek-v4-flash, thinkingcap-qwen3.8-27b, flint]
+
+jobs:
+  sandbox: docker            # or local: pi on the host in the job's clone, no isolation
+  image: ai-factory/executor-base:latest   # a repo's .ai-delegate/Dockerfile builds FROM it
+  cpus: "4"
+  memory: 8g
+  time_limit_s: 1800
+  max_requests: 80           # model calls per job
+  max_tokens: 400000         # new tokens per job: unseen prompt plus output
+  max_diff_lines: 800
+  max_running: 2             # per ai-delegate process (one per Claude Code session)
+  default_context: 131072    # when ai-swap doesn't report a model's window
+
+# Measured routing: `ai-delegate routes --write` reads ai-bench's per-machine tables.
+bench:
+  path: ~/dev/ai-tools/ai-bench
+  tables:
+    studio: dashboard/data-mac/models.csv
+    mini-ubuntu: dashboard/data/models.csv
+  # ai-swap name (optionally @machine) -> ai-bench's name, where they differ. These match
+  # the suite's models as of 2026-11-13.
+  names:
+    deepseek-v4-flash@studio: ds4-q4        # DwarfStar, Q4 experts
+    nemotron-3.5-lightning-30b-a3b: nemotron-lightning
+    gemma-4-26b-a4b: gemma-4-26b
+  ask_min_tps: 75
+  review_min_tps: 20
+  delegate_min_tps: 30
+  delegate_min_pct: 75
+  top: 5
