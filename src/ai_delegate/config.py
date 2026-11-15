@@ -35,7 +35,12 @@ DEFAULT_TIMEOUTS: dict[str, float] = {"ask": 300.0, "review": 600.0}
 class Jobs:
     """Delegated jobs (M2): the sandbox and the per-job budgets (as ai-factory's watchdog)."""
 
-    sandbox: str = "docker"  # or "local": pi runs on the host in the job's clone, unisolated
+    # "docker"; "host": pi on the host under srt (sandbox-runtime), writes limited to the
+    # clone and network to the gateway; "local": pi on the host in the clone, unisolated.
+    sandbox: str = "docker"
+    srt: str = "srt"  # the sandbox-runtime CLI, for sandbox "host"
+    host_allow_write: list[str] = field(default_factory=list)  # extra writable paths (caches)
+    host_deny_read: list[str] = field(default_factory=list)  # added to sandbox.HOST_DENY_READ
     image: str = "ai-factory/executor-base:latest"
     cpus: str = "4"
     memory: str = "8g"
@@ -49,7 +54,10 @@ class Jobs:
 
 @dataclass
 class Config:
-    endpoint: str = "http://studio.local:8080"
+    endpoint: str = "http://studio.local:8080"  # the first of endpoints
+    # ai-swap addresses in order of preference, e.g. the LAN name, then its Tailscale name;
+    # the first that answers is used, and a failed connection moves on to the next.
+    endpoints: list[str] = field(default_factory=list)
     routes: dict[str, list[str]] = field(default_factory=lambda: dict(DEFAULT_ROUTES))
     timeouts: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
     max_input_bytes: int = 400_000  # files and diffs sent with one call
@@ -77,7 +85,8 @@ def load(path: Path = CONFIG_PATH, routes_path: Path | None = None) -> Config:
     if path.is_file():
         raw: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
         cfg.source = str(path)
-        cfg.endpoint = str(raw.get("endpoint", cfg.endpoint))
+        ep = raw.get("endpoint", cfg.endpoint)
+        cfg.endpoints = [str(e) for e in ep] if isinstance(ep, list) else [str(ep)]
         for tool in ("ask", "review", "delegate", "research"):
             section = raw.get(tool) or {}
             if "models" in section:
@@ -96,7 +105,10 @@ def load(path: Path = CONFIG_PATH, routes_path: Path | None = None) -> Config:
             if key not in BenchConfig.__dataclass_fields__:
                 raise ValueError(f"{path}: unknown bench setting {key!r}")
             setattr(cfg.bench, key, value)
-    if env := os.environ.get("AI_DELEGATE_ENDPOINT"):
-        cfg.endpoint = env
-    cfg.endpoint = cfg.endpoint.rstrip("/")
+    if env := os.environ.get("AI_DELEGATE_ENDPOINT"):  # one URL, or several comma-separated
+        cfg.endpoints = env.split(",")
+    cfg.endpoints = [e.strip().rstrip("/") for e in cfg.endpoints or [cfg.endpoint] if e.strip()]
+    if not cfg.endpoints:
+        raise ValueError("endpoint is empty")
+    cfg.endpoint = cfg.endpoints[0]
     return cfg

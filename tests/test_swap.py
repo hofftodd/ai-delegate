@@ -83,3 +83,77 @@ async def test_chat_deadline_returns_partial():
 
     r = await client(h).chat("flint", [], max_tokens=10, temperature=None, deadline_s=0.3)
     assert r.timed_out and r.text == "partial"
+
+
+# -- several endpoints: LAN name first, Tailscale name next ------------------------------
+
+
+def two_routes(down: set[str]):
+    """ai-swap reachable as http://home and http://ts; hosts in ``down`` refuse connections
+    (as studio.local does away from home)."""
+    seen: list[str] = []
+
+    def h(req):
+        seen.append(req.url.host)
+        if req.url.host in down:
+            raise httpx.ConnectError("nodename nor servname provided")
+        if req.url.path == "/api/status":
+            return httpx.Response(200, json=status())
+        return httpx.Response(200, json=models())
+
+    return AiSwap(["http://home/", "http://ts"], transport=httpx.MockTransport(h)), seen
+
+
+async def test_first_endpoint_used_when_it_answers():
+    swap, seen = two_routes(down=set())
+    await swap.cluster()
+    assert swap.endpoint == "http://home" and set(seen) == {"home"}
+
+
+async def test_fails_over_and_stays():
+    swap, seen = two_routes(down={"home"})
+    cl = await swap.cluster()
+    assert len(cl.models) == 5 and swap.endpoint == "http://ts"
+    seen.clear()
+    await swap.cluster()  # sticks with the endpoint that works
+    assert set(seen) == {"ts"}
+
+
+async def test_fails_back_when_the_current_one_goes():
+    swap, _ = two_routes(down={"ts"})  # on Tailscale, then it drops and home answers
+    swap.endpoint = "http://ts"
+    await swap.cluster()
+    assert swap.endpoint == "http://home"
+
+
+async def test_all_endpoints_down():
+    swap, _ = two_routes(down={"home", "ts"})
+    with pytest.raises(SwapError, match="can't reach ai-swap at any of http://home, http://ts"):
+        await swap.cluster()
+
+
+async def test_http_errors_dont_fail_over():
+    """A 500 means ai-swap answered: switching routes wouldn't help."""
+
+    def h(req):
+        return httpx.Response(500, text="boom")
+
+    swap = AiSwap(["http://home", "http://ts"], transport=httpx.MockTransport(h))
+    with pytest.raises(SwapError, match="can't read ai-swap's status at http://home"):
+        await swap.cluster()
+    assert swap.endpoint == "http://home"
+
+
+def test_config_endpoint_list_and_env(tmp_path, monkeypatch):
+    from ai_delegate import config
+
+    monkeypatch.delenv("AI_DELEGATE_ENDPOINT", raising=False)
+    path = tmp_path / "config.yaml"
+    path.write_text("endpoint:\n  - http://studio.local:8080/\n  - http://studio.ts.net:8080\n")
+    cfg = config.load(path, tmp_path / "routes.yaml")
+    assert cfg.endpoints == ["http://studio.local:8080", "http://studio.ts.net:8080"]
+    assert cfg.endpoint == "http://studio.local:8080"
+    path.write_text("endpoint: http://one:8080\n")
+    assert config.load(path, tmp_path / "routes.yaml").endpoints == ["http://one:8080"]
+    monkeypatch.setenv("AI_DELEGATE_ENDPOINT", "http://a, http://b/")
+    assert config.load(path, tmp_path / "routes.yaml").endpoints == ["http://a", "http://b"]

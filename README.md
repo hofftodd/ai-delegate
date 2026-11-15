@@ -114,11 +114,19 @@ delegate(task, done_when, test_command="uv run pytest -q tests/test_x.py")
   ignored). Pass `include_uncommitted=false` to start from bare HEAD. The result is one diff
   against that starting point, so it applies to your tree as it was when the job started.
   `job_result` checks whether it still does.
-- **The sandbox.** By default pi runs in a Docker container with only the job's clone
-  mounted. The container sits on an internal network whose only other member is a relay to
-  ai-delegate's gateway, so the agent can reach its model and nothing else: not the LAN,
-  ai-swap directly, or the internet. `sandbox="local"` runs pi as a host process in the
-  clone instead, with no isolation; results say so.
+- **The sandbox.** Three levels, set per job (`sandbox=`) or in config (`jobs.sandbox`):
+  - `docker` (the default): pi runs in a container with only the job's clone mounted. The
+    container sits on an internal network whose only other member is a relay to
+    ai-delegate's gateway, so the agent can reach its model and nothing else: not the LAN,
+    ai-swap directly, or the internet.
+  - `host`: pi runs on this machine under [srt](https://github.com/anthropic-experimental/sandbox-runtime)
+    (Seatbelt on macOS, bubblewrap on Linux), for machines without Docker or tests that
+    need the host's toolchains. It can write only the clone and a scratch dir, can't read
+    credentials (`~/.ssh`, `~/.aws`, `gh`, keychains...) or other jobs, gets none of the
+    parent's environment variables, and reaches only the gateway, through srt's proxy.
+    Weaker than Docker (same kernel and uid, the rest of the disk readable). Needs `srt` on
+    PATH (on Linux also bwrap, socat and rg); tested on macOS.
+  - `local`: pi runs as a host process in the clone with no isolation; results say so.
 - **Toolchains.** The base image (`ai-factory/executor-base`) has git, bash, rg, fd and jq,
   but no language runtimes. A repo that needs one adds `.ai-delegate/Dockerfile` (or uses
   ai-factory's `.ai-factory/Dockerfile`) `FROM ai-factory/executor-base:latest`. The job
@@ -158,7 +166,9 @@ so relative paths, `git diff` and new jobs refer to the repo you're working in, 
 
 Configuration is optional: copy [examples/config.yaml](examples/config.yaml) to
 `~/.config/ai-delegate/config.yaml`. It covers the endpoint, candidate lists, time and size
-limits, job budgets and sandbox, and the ai-bench name map. `AI_DELEGATE_ENDPOINT` overrides
+limits, job budgets and sandbox, and the ai-bench name map. `endpoint` can be a list (say the LAN name, then the Tailscale name): the first that answers
+is used, and a failed connection moves to the next, so a laptop away from home still reaches
+the local models. `AI_DELEGATE_ENDPOINT` (comma-separated) overrides
 the endpoint. Rerun `routes --write` after new ai-bench results; it prints any models it
 couldn't match.
 

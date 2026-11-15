@@ -72,11 +72,11 @@ def briefing(task: str, done_when: str, test_command: str | None, sandboxed: boo
     )
 
 
-def command(sandboxed: bool, tools: tuple[str, ...] = TOOLS) -> list[str]:
-    """The command to start pi. Its agent dir must be writable, so the read-only control
-    dir's models.json is copied into a fresh one first."""
+def command(agent: str, tools: tuple[str, ...] = TOOLS) -> list[str]:
+    """The command to start pi, with ``agent`` (a shell expression) as its agent dir. That
+    dir must be writable, so the control dir's models.json is copied into a fresh one
+    first."""
     flags = " ".join([*FLAGS, "--tools", ",".join(tools)])
-    agent = "$HOME/.pi/agent" if sandboxed else "$AI_DELEGATE_CTL/agent"
     return [
         "bash",
         "-c",

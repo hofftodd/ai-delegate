@@ -103,8 +103,11 @@ def estimate_tokens(text: str) -> int:
 
 
 class Gateway:
-    def __init__(self, upstream: str, transport: httpx.AsyncBaseTransport | None = None):
-        self.upstream = upstream.rstrip("/")
+    def __init__(
+        self, upstream: str | Callable[[], str], transport: httpx.AsyncBaseTransport | None = None
+    ):
+        # A callable is read per request, so jobs follow ai-swap's endpoint when it fails over.
+        self._upstream = upstream
         self.meters: dict[str, Meter] = {}
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=900.0, write=60.0, pool=30.0),
@@ -145,6 +148,11 @@ class Gateway:
             await asyncio.sleep(0.02)
         self.port = self._server.servers[0].sockets[0].getsockname()[1]
         return self.port
+
+    @property
+    def upstream(self) -> str:
+        up = self._upstream
+        return (up() if callable(up) else up).rstrip("/")
 
     async def aclose(self) -> None:
         if self._server:

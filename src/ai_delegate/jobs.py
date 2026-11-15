@@ -52,6 +52,13 @@ from ai_delegate.swap import AiSwap
 STATE_DIR = Path(os.environ.get("AI_DELEGATE_STATE", "~/.local/state/ai-delegate")).expanduser()
 ACTIVE = ("preparing", "running", "testing")
 KINDS = ("change", "research")
+SANDBOXES = ("docker", "host", "local")
+# pi's agent dir, as a shell expression: somewhere the sandbox lets it write.
+AGENT_DIRS = {
+    "docker": "$HOME/.pi/agent",
+    "host": "$TMPDIR/pi-agent",
+    "local": "$AI_DELEGATE_CTL/agent",
+}
 POLL_S = 5.0  # how often a running job checks its time limit and changed lines
 
 
@@ -132,6 +139,7 @@ class Manager:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.procs: dict[str, sandbox.Proc] = {}
         self.gateway: Gateway | None = None
+        self._host_ok: str | None = None  # why srt can't run here ('' if it can), once checked
         self._relay_port: int | None = None
         self._swept = False
         self._load()
@@ -175,20 +183,25 @@ class Manager:
             )
 
     async def _check_sandbox(self, mode: str) -> None:
-        if mode not in ("docker", "local"):
-            raise JobError(f"sandbox must be 'docker' or 'local', not {mode!r}")
+        if mode not in SANDBOXES:
+            raise JobError(f"sandbox must be one of {', '.join(SANDBOXES)}, not {mode!r}")
         if mode == "docker":
             if why := await asyncio.to_thread(sandbox.docker_ok):
                 raise JobError(
-                    f"Docker isn't usable ({why}). Pass sandbox='local' to run "
-                    "pi directly in the job's clone, without isolation."
+                    f"Docker isn't usable ({why}). Pass sandbox='host' to run pi on this "
+                    "machine under srt, or 'local' to run it without isolation."
                 )
             if not await asyncio.to_thread(sandbox.image_present, self.cfg.jobs.image):
                 raise JobError(
                     f"the sandbox image {self.cfg.jobs.image} isn't built here; "
                     "run `ai-delegate image` (or pass sandbox='local')"
                 )
-        elif not shutil.which("pi"):
+            return
+        if mode == "host" and self._host_ok is None:
+            self._host_ok = await asyncio.to_thread(sandbox.host_ok, self.cfg.jobs.srt)
+        if mode == "host" and self._host_ok:
+            raise JobError(f"the host sandbox isn't usable: {self._host_ok}")
+        if not shutil.which("pi"):
             raise JobError(
                 "pi isn't on PATH, so it can't run locally (npm i -g "
                 "@earendil-works/pi-coding-agent), or use the Docker sandbox"
@@ -277,7 +290,7 @@ class Manager:
 
     async def _gateway(self) -> Gateway:
         if self.gateway is None:
-            self.gateway = Gateway(self.cfg.endpoint)
+            self.gateway = Gateway(lambda: self.swap.endpoint)
             await self.gateway.start(sandbox.gateway_bind_host())
         return self.gateway
 
@@ -304,7 +317,7 @@ class Manager:
         await self._attempt(job)
 
     def _prompt(self, job: Job) -> str:
-        sandboxed = job.sandbox == "docker"
+        sandboxed = job.sandbox != "local"
         if job.kind == "research":
             previous = job.history[-1]["summary"] if job.history else ""
             return pi.research_briefing(job.task, job.done_when, job.feedback, previous)
@@ -340,6 +353,12 @@ class Manager:
                 self._relay_port = gw.port
             else:
                 base = f"http://127.0.0.1:{gw.port}"
+            if job.sandbox == "host":
+                j = self.cfg.jobs
+                settings = sandbox.host_settings(
+                    job.dir, repo, gw.port, j.host_allow_write, j.host_deny_read
+                )
+                (ctl / "srt.json").write_text(json.dumps(settings, indent=2))
             max_out = min(self.cfg.max_output_tokens, job.window // 4)
             (ctl / "models.json").write_text(
                 json.dumps(pi.models_config(f"{base}/g/{token}/v1", job.model, job.window, max_out))
@@ -360,7 +379,7 @@ class Manager:
                 f"ai-delegate-{job.id}-{job.attempt}",
                 repo,
                 ctl,
-                pi.command(job.sandbox == "docker", tools),
+                pi.command(AGENT_DIRS[job.sandbox], tools),
                 {"AI_DELEGATE_MODEL": job.model},
             )
             code = await self._step(job, step, out, log, meter, check_diff=job.kind == "change")
@@ -432,6 +451,10 @@ class Manager:
         if job.sandbox == "docker":
             proc = await sandbox.start_docker(
                 step, job.image or self.cfg.jobs.image, self.cfg.jobs.cpus, self.cfg.jobs.memory
+            )
+        elif job.sandbox == "host":
+            proc = await sandbox.start_host(
+                step, self.cfg.jobs.srt, step.ctl / "srt.json", job.dir / "tmp"
             )
         else:
             proc = await sandbox.start_local(step)

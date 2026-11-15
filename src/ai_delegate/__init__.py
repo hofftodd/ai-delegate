@@ -70,12 +70,14 @@ async def _doctor(server) -> int:  # type: ignore[no-untyped-def]
 
     cfg = server.cfg
     print(f"config:   {cfg.source}")
-    print(f"endpoint: {cfg.endpoint}")
     try:
         cluster = await server.swap.cluster()
     except SwapError as e:
+        print(f"endpoint: {', '.join(cfg.endpoints)}")
         print(f"FAIL      {e}")
         return 1
+    others = [e for e in cfg.endpoints if e != server.swap.endpoint]
+    print(f"endpoint: {server.swap.endpoint}" + (f" (also: {', '.join(others)})" if others else ""))
     loaded = sum(m.loaded for m in cluster.models)
     print(
         f"ai-swap:  ok, {len(cluster.models)} models on {len(cluster.machines)} machines, "

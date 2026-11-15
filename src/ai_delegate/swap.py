@@ -163,14 +163,50 @@ Progress = Callable[[int, str], Awaitable[None]]
 
 
 class AiSwap:
-    def __init__(self, endpoint: str, transport: httpx.AsyncBaseTransport | None = None):
-        self.endpoint = endpoint.rstrip("/")
+    """ai-swap's API. Given several endpoints (the same ai-swap by different routes, such as
+    its LAN name and its Tailscale name), it uses the first that answers and moves to the
+    next when a connection fails: away from home, ``studio.local`` doesn't resolve but the
+    Tailscale name does."""
+
+    def __init__(
+        self, endpoint: str | list[str], transport: httpx.AsyncBaseTransport | None = None
+    ):
+        self.endpoints = [
+            e.rstrip("/") for e in ([endpoint] if isinstance(endpoint, str) else endpoint)
+        ]
+        self.endpoint = self.endpoints[0]
         self._transport = transport
+
+    async def _failover(self) -> bool:
+        """Point at the first endpoint that answers /api/status, current one last; True if
+        one did."""
+        order = [e for e in self.endpoints if e != self.endpoint] + [self.endpoint]
+        for e in order:
+            try:
+                async with httpx.AsyncClient(timeout=4.0, transport=self._transport) as c:
+                    if (await c.get(f"{e}/api/status")).status_code == 200:
+                        self.endpoint = e
+                        return True
+            except httpx.HTTPError:
+                continue
+        return False
 
     def _client(self, timeout: httpx.Timeout | float) -> httpx.AsyncClient:
         return httpx.AsyncClient(base_url=self.endpoint, timeout=timeout, transport=self._transport)
 
     async def cluster(self, with_speed: bool = False) -> Cluster:
+        try:
+            return await self._cluster(with_speed)
+        except SwapError as e:
+            if len(self.endpoints) < 2 or not isinstance(e.__cause__, httpx.TransportError):
+                raise
+            if not await self._failover():
+                raise SwapError(
+                    f"can't reach ai-swap at any of {', '.join(self.endpoints)}: {e.__cause__}"
+                ) from e.__cause__
+            return await self._cluster(with_speed)
+
+    async def _cluster(self, with_speed: bool) -> Cluster:
         try:
             async with self._client(5.0) as c:
                 st, md = await asyncio.gather(c.get("/api/status"), c.get("/v1/models"))
