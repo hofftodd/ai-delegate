@@ -155,6 +155,7 @@ class Daemon:
                     time_limit_s=b.get("time_limit_s"),
                     sandbox_mode=b.get("sandbox_mode"),
                     kind=str(b.get("kind", "change")),
+                    depth=b.get("depth"),
                 )
                 return job_json(job, 201)
 
@@ -326,6 +327,7 @@ class Client:
         time_limit_s: float | None,
         sandbox_mode: str | None,
         kind: str = "change",
+        depth: int | None = None,
     ) -> Job:
         body = {
             "task": task,
@@ -337,6 +339,7 @@ class Client:
             "time_limit_s": time_limit_s,
             "sandbox_mode": sandbox_mode,
             "kind": kind,
+            "depth": depth,
         }
         return job_from(await self._call("POST", "/jobs", body, timeout=180))
 

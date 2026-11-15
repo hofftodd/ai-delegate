@@ -6,6 +6,8 @@ behind [ai-swap](https://github.com/hofftodd/ai-swap):
 - quick questions about files, and reviews of a diff;
 - codebase research: a local agent explores the repo read-only and reports, with its
   `file:line` citations checked against the code;
+- web research: the local models search the web and read the pages, and report with
+  sources, every quote checked against the page it came from;
 - delegated coding jobs that a local agent (pi) works on in a sandboxed copy of the repo and
   hands back as a diff, revisable with feedback.
 
@@ -17,8 +19,8 @@ It picks models from ai-bench's measurements and prefers one that is already loa
 doesn't make a machine swap models. It skips machines that ai-bench has reserved, and every
 answer says which model on which machine produced it.
 
-**Status:** M1 (quick tools), M2 (delegated jobs) and M3 (routing from ai-bench, and the
-Claude Code skill) are built. See [DESIGN.md](DESIGN.md).
+**Status:** M1 (quick tools), M2 (delegated jobs), M3 (routing from ai-bench, and the
+Claude Code skill), M4 (the job daemon) and web research are built. See [DESIGN.md](DESIGN.md).
 
 ## Tools
 
@@ -29,9 +31,10 @@ Claude Code skill) are built. See [DESIGN.md](DESIGN.md).
 | `ask` | A self-contained question to a local model, with files attached by path. Returns the answer and a footer: model, machine, why it was picked, tokens, seconds, tok/s |
 | `review` | Low-temperature bug review of a git diff (`git diff` arguments: `--staged`, `main...HEAD`), whole files, or a pasted diff. Findings, most severe first, or "No findings." |
 | `research` | Starts a read-only research job: a question about the codebase, optional scope. The agent can only read, grep, find and ls. Returns a job id at once |
+| `web_research` | Starts a web research job: a question, optional scope, a depth (search rounds, 1 to 3). The local models plan, search through ai-search, read pages and write a report citing only quotes found on their pages. Returns a job id at once |
 | `delegate` | Starts a coding job: a task, done-when criteria, an optional test command. Returns a job id at once |
 | `job_status` | A job's state, elapsed time, budget use and the agent's last actions; with no id, every job |
-| `job_result` | A change job's summary, test output, diff, and whether it applies cleanly to your working tree (with the `git apply` command); a research job's report and its citation check |
+| `job_result` | A change job's summary, test output, diff, and whether it applies cleanly to your working tree (with the `git apply` command); a research job's report and its citation check; a web research job's report, sources and verification counts |
 | `job_revise` | Sends a finished job back to its agent with feedback, in the same clone: a change job builds on its diff, a research job answers a follow-up. Fresh budgets per attempt |
 | `job_cancel`, `job_discard` | Stop a job (its work so far is kept), or delete it |
 | `feedback` | Records what happened to a result (an `ask`/`review` call id or a job id): kept, fixed, redone or unused |
@@ -101,6 +104,40 @@ citations, and open questions. Each citation is checked in two steps:
 The second check exists because pi's `read` shows no line numbers and models count by eye.
 The briefing tells the agent to take line numbers from `grep`. `job_revise` asks a follow-up
 in the same clone, with the earlier report in hand.
+
+## Web research
+
+`web_research(question, scope, depth)` is a fixed pipeline that ai-delegate runs itself:
+local models are good at one bounded step with a JSON answer, and poor at deciding when an
+open-ended search is done. Each step is one model call:
+
+1. **Plan:** 3 to 5 sub-questions (`web.max_subquestions`), each with up to 3 queries.
+2. **Search** through [ai-search](../ai-search) (`web.search_url`, any SearXNG-shaped
+   API; a list is tried in order). Each sub-question reads its top 4 new pages, at most two
+   per site (`web.pages_per_sub`).
+3. **Read:** each page, reduced to text (`web.page_chars`, 15,000), gives findings, each a
+   claim and an exact quote.
+4. **Verify:** each quote is looked for on its page, with whitespace, case and typographic
+   quotes and dashes normalized. A finding whose quote isn't there is dropped from the
+   report.
+5. **Fill gaps** (depth 2, the default, or 3): the model names thin sub-questions and new
+   queries, and steps 2 to 4 run again for them.
+6. **Write:** a report from verified findings only, citing `[n]`. The source list is
+   added by ai-delegate, not the model, and citation numbers that don't exist are flagged.
+
+`job_revise(id, "<follow-up>")` plans only the new sub-questions, reuses the pages already
+read, and rewrites the report. The full findings, quotes and pages are kept in the job's
+`web.json`.
+
+Fetching is guarded: http(s) only; every address a host resolves to must be public (no
+localhost, LAN or link-local), checked again at each of at most 3 redirects; at most 3 MB;
+HTML and plain text only (no PDFs yet). Page text is treated as data, never as
+instructions. A verified quote means the page says it, not that it's true, so the report is
+a set of leads with sources to open. Model calls and new tokens count against the job's
+budgets, as for other jobs.
+
+Away from home, ai-search on mini-ubuntu2 is only reachable if that machine is on your
+tailnet; list its Tailscale name second in `web.search_url`.
 
 ## Delegated jobs
 

@@ -107,6 +107,54 @@ Local models are slow enough that delegation has to be asynchronous: ThinkingCap
 - **Tell the agent its tools.** Give pi its grep, find and ls tools, with rg, fd and jq installed, and say so in the briefing (ai-factory#20).
 - **Don't trust a "no problems" note over the tests.** Act on an agent's report only when the tests agree (ai-factory#17).
 
+## Web research
+
+`web_research(question, scope, depth)` has the local models research a topic on the web and
+return a cited report, so Claude spends its tokens on the report, not on the pages. It is a
+job (kind `web`), so it runs in the daemon and uses `job_status`, `job_result` and
+`job_revise` like the others.
+
+- **A fixed pipeline, not an agent loop.** Local models are good at one bounded step with a
+  JSON answer, and poor at deciding when a search is done; they stop early or wander. So
+  ai-delegate runs the loop itself, and the model does one step at a time:
+  1. **Plan:** split the question into 3 to `web.max_subquestions` sub-questions, each
+     with 2 or 3 search queries.
+  2. **Search:** each query goes to ai-search (`web.search_url`, SearXNG's JSON API). The
+     URLs are deduplicated, and each sub-question keeps its top `web.pages_per_sub`
+     pages, at most two per site.
+  3. **Read:** each page is fetched (public addresses only, see below) and reduced to
+     text. The model then reads it with its sub-question and returns findings, each a
+     claim plus an exact quote from the page.
+  4. **Verify:** each quote is looked for in the page text, with whitespace, case and
+     typographic quotes and dashes normalized. A finding whose quote isn't in the page is
+     kept but marked unverified, and the report can't cite it as support.
+  5. **Fill gaps** (`depth` 2 or more): the model looks at what each sub-question has and
+     proposes follow-up queries for the thin ones, and steps 2 to 4 run again.
+  6. **Write:** the model writes the report from the verified findings only, citing them
+     as `[n]`. ai-delegate checks the numbers and appends the source list itself (URL,
+     title, quotes found), so a citation always points at a page that was read.
+- **Revise** (`job_revise`) runs a follow-up as a new attempt. It reuses the pages already
+  read, plans only the new sub-questions, and rewrites the report with the earlier one as
+  context.
+- **Fetching is guarded,** as in ai-factory's `research.py`, since a page and a search
+  result both come from strangers:
+  - only http(s);
+  - every address the host resolves to must be public (no localhost, LAN, link-local or
+    other reserved ranges), checked again at each redirect hop, with at most 3 hops;
+  - at most 3 MB read, and only HTML or plain text (PDFs are skipped in version 1).
+- **Pages are untrusted.** The reading prompt frames a page as data to quote, not
+  instructions to follow, and the result says plainly that findings are leads.
+  Verification is about faithfulness to the page, not truth: a verified quote only means
+  the page says it.
+- **Budgets:** the job's model calls and new tokens count against `jobs.max_requests` and
+  `jobs.max_tokens`, as for other jobs, and it has the same time limit. Pages are capped at
+  `web.page_chars` of text.
+- **The native estimate** for the token ledger is the text of the pages read: what Claude
+  would have pulled into its context doing this with its own search and fetch.
+- **Routing:** `web_research` has its own candidate list (default: flint,
+  deepseek-v4-flash, qwen3.8-27b): fast models that follow JSON instructions well, because
+  the pipeline makes many small calls.
+
 ## Persistent job daemon (built)
 
 Today Claude Code starts one ai-delegate process per session, over stdio, and that process

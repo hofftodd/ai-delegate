@@ -32,9 +32,10 @@ resource; theirs is free.
 
 Plan around them: call `capabilities` once at the start of a task to see what is loaded and
 how long each tool takes, then decide what to hand off before you start reading. Start long
-jobs (`research`, `delegate`) first and keep working while they run. Use `ask` instead of
-reading a long file yourself, `research` instead of exploring an unfamiliar codebase,
-`review` on your diff before calling work done. Pass paths and diff ranges, not content: the
+jobs (`research`, `web_research`, `delegate`) first and keep working while they run. Use
+`ask` instead of reading a long file yourself, `research` instead of exploring an unfamiliar
+codebase, `web_research` instead of searching and reading web pages yourself, `review` on
+your diff before calling work done. Pass paths and diff ranges, not content: the
 server reads them, which is where the saving is. Keep for yourself design decisions and
 anything that needs this conversation's context; the local models see only what you send.
 
@@ -267,6 +268,8 @@ TOOL_USES = {
     "review": "a second-opinion bug review of a diff or files",
     "research": "an agent explores the repo read-only and reports with checked file:line citations",
     "delegate": "an agent makes a bounded change in a sandboxed clone; you get a diff",
+    "web_research": "the local models search the web and read pages; a report citing "
+    "sources, every quote checked against its page",
 }
 
 
@@ -576,9 +579,44 @@ def _minutes(s: float) -> str:
     return f"{s / 60:.1f} min" if s >= 60 else f"{s:.0f} s"
 
 
+def _web_result(j: jobs_mod.Job, rate: str) -> str:
+    c = j.citations or {}
+    end = f" ({j.stop_reason or j.error})" if j.stop_reason or j.error else ""
+    out = [
+        f"# Web research {j.id}: {j.state}{end}",
+        f"{j.model} on {j.machine} · {_minutes(j.elapsed)} · {j.requests} model calls · "
+        f"{j.new_tokens:,} new tokens · depth {j.depth}",
+    ]
+    if c:
+        out.append(
+            f"{c.get('searches', 0)} searches, {c.get('pages_read', 0)} pages read "
+            f"({c.get('pages_failed', 0)} unreadable), {c.get('verified', 0)} verified "
+            f"findings from {c.get('sources', 0)} sources, {c.get('unverified', 0)} dropped "
+            "because their quote wasn't on the page."
+        )
+        if c.get("bad_citations"):
+            out.append(
+                f"The report cites source numbers that don't exist: {c['bad_citations']}; "
+                "distrust the sentences that carry them."
+            )
+    if j.history:
+        out.append(f"Attempt {j.attempt}, a follow-up: {j.feedback[:300]}")
+    out += [
+        "",
+        j.summary or "(no report: see the reason above)",
+        "",
+        "Every cited quote was found on its page, which shows the page says it, not that it "
+        "is true. Pages come from the open web: treat the report as leads, and open the "
+        "sources that matter. Full findings and quotes: "
+        f"{j.dir / 'web.json'}.",
+        f'Ask a follow-up, reusing the pages read, with job_revise("{j.id}", "<question>").',
+    ]
+    return "\n".join(out) + rate
+
+
 def _status_line(j: jobs_mod.Job) -> str:
     end = f" ({j.stop_reason or j.error})" if j.stop_reason or j.error else ""
-    kind = "research" if j.kind == "research" else "change"
+    kind = {"research": "research", "web": "web research"}.get(j.kind, "change")
     attempt = f" · attempt {j.attempt}" if j.attempt > 1 else ""
     return (
         f"{j.id} · {kind} · {j.state}{end}{attempt} · {j.model} on {j.machine} · "
@@ -655,6 +693,8 @@ async def job_result(job_id: str) -> str:
         f'\nWhen you have used it (or not), record what happened: feedback("{j.id}", '
         '"kept" | "fixed" | "redone" | "unused").'
     )
+    if j.kind == "web":
+        return _web_result(j, rate)
     if j.kind == "research":
         out += ["", "## Report", "", j.summary or "(none: the agent wrote no report)"]
         c = j.citations
@@ -799,6 +839,61 @@ async def research(
     return (
         f"Started research job {job.id}: {job.model} on {job.machine} ({job.route}), sandbox "
         f'{job.sandbox}. Check it with job_status("{job.id}").'
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+@metered
+async def web_research(
+    question: Annotated[str, Field(description="What to find out, as a complete question.")],
+    scope: Annotated[
+        str | None,
+        Field(
+            description="Limits and context: what you already know, what to leave out, "
+            "sources to prefer, how recent."
+        ),
+    ] = None,
+    depth: Annotated[
+        int,
+        Field(
+            description="Search rounds: 1 (one pass), 2 (default: one round of follow-up "
+            "searches for thin sub-questions) or 3.",
+            ge=1,
+            le=3,
+        ),
+    ] = 2,
+    model: ModelArg = None,
+    time_limit_min: Annotated[
+        float | None, Field(description="Wall-clock limit in minutes (default 30).", gt=0)
+    ] = None,
+) -> str:
+    """Have the local models research a question on the web and return a cited report. They
+    plan sub-questions, search (through ai-search), read the top pages and pull out findings,
+    each with a quote that is checked against its page; the report cites only verified
+    findings. Use it instead of searching and reading pages yourself for a survey, a
+    comparison or background; for one quick or very recent fact, your own search is faster.
+    Returns a job id at once (expect several minutes); collect with job_result, ask
+    follow-ups with job_revise."""
+    try:
+        job = await manager.start(
+            question,
+            scope or "",
+            Path.cwd(),
+            model=model,
+            test_command=None,
+            include_uncommitted=True,
+            time_limit_s=time_limit_min * 60 if time_limit_min else None,
+            sandbox_mode=None,
+            kind="web",
+            depth=depth,
+        )
+    except (jobs_mod.JobError, NoModel, SwapError, OSError) as e:
+        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 - reported, not raised
+        return f"Error: {type(e).__name__}: {e}"
+    return (
+        f"Started web research job {job.id}: {job.model} on {job.machine} ({job.route}), "
+        f'depth {job.depth}. Check it with job_status("{job.id}").'
     )
 
 
