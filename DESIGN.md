@@ -107,6 +107,119 @@ Local models are slow enough that delegation has to be asynchronous: ThinkingCap
 - **Tell the agent its tools.** Give pi its grep, find and ls tools, with rg, fd and jq installed, and say so in the briefing (ai-factory#20).
 - **Don't trust a "no problems" note over the tests.** Act on an agent's report only when the tests agree (ai-factory#17).
 
+## Persistent job daemon (designed, not built)
+
+Today Claude Code starts one ai-delegate process per session, over stdio, and that process
+holds everything: the job manager, the gateway, the Docker relay. Three things follow:
+
+- **A job dies with its session.** Jobs take 35 to 100 minutes on local models, longer than
+  many sessions. When the process ends, its containers are swept and the job is marked
+  interrupted.
+- **Limits are per session, not per machine.** `max_running: 2` is counted per process, so
+  three sessions can start six jobs against the same model hosts.
+- **Every session duplicates the plumbing:** its own gateway, relay container and job list.
+  A job can only be cancelled from the session that started it.
+
+### Options
+
+- **One shared server on the LAN (say on studio): rejected.** The tools read the caller's
+  files, diffs and working tree, and each job clones the caller's repo. A server on studio
+  can't see air15's checkout.
+- **One HTTP MCP server per machine (`claude mcp add --transport http`): possible, not
+  chosen.**
+  - It loses the session's working directory, which is the default `repo` today. Every
+    call would have to pass `repo`, or the server would have to ask the client for its
+    roots, which not every client offers.
+  - It must be running before any session starts, so it needs launchd or systemd on every
+    machine.
+  - It needs a token and DNS-rebinding protection, even on localhost.
+  - An upgrade restarts it, and the restart kills running jobs.
+- **Chosen: a job daemon per machine, behind the stdio server.**
+  - The stdio server stays, one per session, registered exactly as now. It keeps the
+    session's working directory and runs the quick tools (`ask`, `review`, `models`,
+    `capabilities`) in-process, since those are short and stateless.
+  - The job tools (`delegate`, `research`, `job_*`) and the gateway move into
+    `ai-delegate daemon`, one per user per machine, reached over a Unix socket.
+  - Each session's server becomes the front end for jobs.
+
+### How it works
+
+- **Daemon.**
+  - **Owns:** the job manager, the gateway, the Docker relay, the srt preflight and job
+    state (in the same `~/.local/state/ai-delegate/jobs/` as now).
+  - **Socket:** it listens on `~/.local/state/ai-delegate/daemon.sock` (directory 0700,
+    socket 0600). Only the same user can reach it, and nothing is exposed on the network,
+    so it needs no token and DNS rebinding doesn't apply.
+  - **API:** a small JSON API over HTTP on that socket, built with Starlette (already used
+    by the gateway):
+
+    | Request | Does |
+    |---|---|
+    | `POST /jobs` | start a job |
+    | `GET /jobs/{id}` | status |
+    | `GET /jobs/{id}/result` | result |
+    | `POST /jobs/{id}/revise` | another attempt |
+    | `POST /jobs/{id}/cancel` | stop it |
+    | `DELETE /jobs/{id}` | discard it |
+    | `GET /health` | version, pid, running jobs, uptime |
+    | `POST /shutdown` | exit |
+
+  - The front end turns these into the same text results as today; the formatting code
+    stays in `server.py`. The client is httpx over the socket
+    (`AsyncHTTPTransport(uds=...)`).
+- **Auto-start, with no service required.**
+  - On the first job call, the front end connects. If nothing answers, it starts
+    `ai-delegate daemon` detached (new session, output to `daemon.log` in the state dir)
+    and waits up to 10 s for `/health`.
+  - An flock on `daemon.lock` stops two sessions from starting two daemons.
+  - A launchd or systemd unit can keep it always on, but isn't needed.
+- **Lifetime.** With no active jobs and no requests for `jobs.daemon_idle_exit_s`
+  (default 1800), the daemon exits, so there's no service to look after. Set it to 0 to
+  never exit, for use under a unit.
+- **Repo.** The front end resolves `repo` (the session's working directory by default) to
+  an absolute path before sending it. The behavior is the same as today.
+- **Limits per machine.** `max_running` counts the daemon's jobs, so it applies to the
+  whole machine. Version 1 refuses a job past the limit, as now; a queue (start returns a
+  queued job) becomes easy and is an open question.
+- **Shared jobs.** Any session on the machine can check, cancel, revise or discard any
+  job: the "cancel it from that session" rule goes. `job.pid` becomes the daemon's pid.
+- **Upgrades without killing jobs.** `/health` reports the code version (package version
+  plus the checkout's commit).
+  - When a front end on newer code finds an older daemon that is idle, it sends
+    `POST /shutdown` and starts a new one.
+  - When the older daemon is busy, the front end keeps using it, with new jobs going to
+    the old code. It marks the daemon "exit when idle", and the next call after it exits
+    starts the new one.
+  - `capabilities` says when an older daemon is still running.
+- **Crashes.** On start, the daemon marks active jobs left by a dead pid as interrupted,
+  and sweeps containers labeled with that pid, as now. Reattaching to a dead daemon's
+  running containers is possible later; not in version 1.
+- **Accounting.** Front ends append each call's cost to the ledger, as now. The daemon
+  appends each job's native-cost estimate, which the job manager makes today. Both append
+  small lines with O_APPEND, which is safe across processes. Session overhead stays per
+  front-end process.
+- **Progress.** Job tools return at once, so nothing streams over the socket. `ask` and
+  `review` progress is unchanged, since they stay in the front end.
+
+### What it doesn't fix
+
+- **Spreading jobs across machines** (larder2: both jobs on studio while mini-ubuntu sat
+  idle) still needs routing that counts work in flight per model host. One daemon sees
+  only its own machine's jobs, and other machines' daemons send jobs to the same hosts.
+  The right source is ai-swap's own count of in-flight requests per node. That is a
+  routing change, separate from this.
+- **Using the quick tools from a machine without ai-delegate.** That is the "serve them
+  from ai-swap over HTTP" open question.
+
+### Tests
+
+- The daemon API over a real Unix socket.
+- Two front ends racing to auto-start (only one daemon).
+- Upgrade handover, idle and busy.
+- Idle exit.
+- Interrupted-job marking after the daemon is killed.
+- A job that survives its front end exiting.
+
 ## Configuration and install
 
 Install is one command per machine that runs Claude Code, and the suite keeps it up to date like the other tools.
@@ -206,12 +319,15 @@ Each milestone is usable on its own; the trial decides whether the later ones ha
 4. **M3, measured routing and the skill (built):** `ai-delegate routes --write` ranks pinned copies (`model@machine`) per tool from ai-bench's per-machine tables into `routes.yaml`, matching on engine, with a name map for the rest. `skills/ai-delegate/SKILL.md` (installed with `ai-delegate skill`) says when to delegate.
 
 5. **After M3 (built 2026-11-13):** `research` (read-only codebase research with citation checking), `job_revise` (another attempt in the same clone, with feedback), `feedback` (outcomes: kept, fixed, redone, unused), and `capabilities` (a live planning briefing). Tool calls feed a token ledger: what each call cost Claude against an estimate of the native cost, net of results rated redone or unused. The server instructions and the skill make saving Claude's tokens part of its goal. The evaluation plan's notes are now `feedback` plus `ai-delegate stats`.
+6. **M4, persistent job daemon (designed 2026-11-15):** move the job tools and the gateway into `ai-delegate daemon`, one per machine, behind the per-session stdio server (see Persistent job daemon). Jobs outlive sessions, limits count per machine, and any session can manage any job. Steps: the daemon and its socket API; the front end's client, auto-start and lock; version handover and idle exit; the job tools switched over; tests; then the skill's polling and cancel text.
 
 Open questions:
 
 - [x] Python (shares ai-factory's pi and gateway code) or TypeScript (the MCP ecosystem's default)? Python, with the official `mcp` SDK (2.x).
 - [ ] Is the native-cost estimate good enough? It counts what Claude would have read (files, diffs, what a local agent read), not the reasoning it would also have done. Compare it with real sessions' token use once there are some.
-- [ ] Web research for local models: port ai-factory's `research.py` (SearXNG search, public-only fetch) once a SearXNG instance runs on the LAN.
+- [ ] Web research for local models: port ai-factory's `research.py` (public-only fetch), searching through ai-search on mini-ubuntu2 (`:8889`, Brave behind a SearXNG-shaped API). The search side exists; the tool doesn't yet.
+- [ ] Daemon: refuse a job past `max_running` (v1), or queue it?
+- [ ] Daemon: reattach to a crashed daemon's running containers instead of marking their jobs interrupted?
 - [ ] Should the quick tools also be served by ai-swap itself as an HTTP MCP endpoint, so any machine can use them without installing ai-delegate?
 - [x] How much of ai-factory's sandbox and gateway can be shared as a library rather than copied? Little as things stand: its gateway and runtime are bound to its database and settings. M2 copies the patterns (gateway accounting, pi flags and event parsing, network relay) and reuses the executor image as is.
 - [x] Does a delegated job need the conversation's context, or only the task text and the repo? Built with only the task, done-when, test command and the repo; the skill tells Claude to make the brief complete. Revisit if jobs fail for lack of context.
