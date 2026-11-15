@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from ai_delegate.bench import BenchConfig
+from ai_delegate.web import WebConfig
 
 CONFIG_PATH = Path(
     os.environ.get("AI_DELEGATE_CONFIG", "~/.config/ai-delegate/config.yaml")
@@ -27,6 +28,8 @@ DEFAULT_ROUTES: dict[str, list[str]] = {
     "delegate": ["flint", "deepseek-v4-flash", "qwen3.8-27b"],
     # Reading and reasoning over code: careful, then fast.
     "research": ["deepseek-v4-flash", "thinkingcap-qwen3.8-27b", "flint"],
+    # Many small JSON steps (plan, read a page, write): fast models that follow instructions.
+    "web_research": ["flint", "deepseek-v4-flash", "qwen3.8-27b"],
 }
 DEFAULT_TIMEOUTS: dict[str, float] = {"ask": 300.0, "review": 600.0}
 
@@ -69,6 +72,7 @@ class Config:
     max_output_tokens: int = 32_768  # cap on a quarter of the model's context
     jobs: Jobs = field(default_factory=Jobs)
     bench: BenchConfig = field(default_factory=BenchConfig)
+    web: WebConfig = field(default_factory=WebConfig)
     # Where each tool's list came from: "defaults", "ai-bench (<date>)" or "config.yaml".
     route_source: dict[str, str] = field(default_factory=dict)
     scores: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -92,7 +96,7 @@ def load(path: Path = CONFIG_PATH, routes_path: Path | None = None) -> Config:
         cfg.source = str(path)
         ep = raw.get("endpoint", cfg.endpoint)
         cfg.endpoints = [str(e) for e in ep] if isinstance(ep, list) else [str(ep)]
-        for tool in ("ask", "review", "delegate", "research"):
+        for tool in ("ask", "review", "delegate", "research", "web_research"):
             section = raw.get(tool) or {}
             if "models" in section:
                 cfg.routes[tool] = [str(m) for m in section["models"] or []]
@@ -106,6 +110,14 @@ def load(path: Path = CONFIG_PATH, routes_path: Path | None = None) -> Config:
                 raise ValueError(f"{path}: unknown jobs setting {key!r}")
             current = getattr(cfg.jobs, key)
             setattr(cfg.jobs, key, type(current)(value))
+        for key, value in (raw.get("web") or {}).items():
+            if key not in WebConfig.__dataclass_fields__:
+                raise ValueError(f"{path}: unknown web setting {key!r}")
+            if key == "search_url":
+                value = [str(u) for u in value] if isinstance(value, list) else [str(value)]
+            else:
+                value = type(getattr(cfg.web, key))(value)
+            setattr(cfg.web, key, value)
         for key, value in (raw.get("bench") or {}).items():
             if key not in BenchConfig.__dataclass_fields__:
                 raise ValueError(f"{path}: unknown bench setting {key!r}")

@@ -51,6 +51,20 @@ jobs:
   default_context: 131072    # when ai-swap doesn't report a model's window
 
 # Measured routing: `ai-delegate routes --write` reads ai-bench's per-machine tables.
+# Web research (web_research). search_url: ai-search, or any SearXNG with JSON output; a
+# list is tried in order (the LAN name, then a Tailscale name for use away from home).
+web:
+  search_url: [http://mini-ubuntu2.local:8889]
+  max_subquestions: 5
+  queries_per_sub: 3
+  results_per_query: 8
+  pages_per_sub: 4         # new pages read per sub-question per round
+  page_chars: 15000        # text kept per page
+  fetch_concurrency: 4
+  fetch_timeout_s: 20
+# web_research:
+#   models: [flint, deepseek-v4-flash, qwen3.8-27b]
+
 bench:
   path: ~/dev/ai-tools/ai-bench
   tables:

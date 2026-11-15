@@ -51,7 +51,7 @@ from ai_delegate.swap import AiSwap
 
 STATE_DIR = Path(os.environ.get("AI_DELEGATE_STATE", "~/.local/state/ai-delegate")).expanduser()
 ACTIVE = ("preparing", "running", "testing")
-KINDS = ("change", "research")
+KINDS = ("change", "research", "web")
 SANDBOXES = ("docker", "host", "local")
 STOPPED_EXIT = 130  # a step skipped or killed because the job was stopped
 # pi's agent dir, as a shell expression: somewhere the sandbox lets it write.
@@ -81,6 +81,7 @@ class Job:
     include_uncommitted: bool = True
     time_limit_s: float = 1800
     max_diff_lines: int = 800
+    depth: int = 2  # web research: search rounds (1: no follow-up searches)
     created: float = field(default_factory=time.time)
     started: float | None = None  # this attempt's start
     finished: float | None = None
@@ -140,6 +141,7 @@ class Manager:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.procs: dict[str, sandbox.Proc] = {}
         self.gateway: Gateway | None = None
+        self.web_transport: Any = None  # tests: fake search results and pages
         self._host_ok: str | None = None  # why srt can't run here ('' if it can), once checked
         self._relay_port: int | None = None
         self._swept = False
@@ -220,15 +222,19 @@ class Manager:
         time_limit_s: float | None,
         sandbox_mode: str | None,
         kind: str = "change",
+        depth: int | None = None,
     ) -> Job:
         if kind not in KINDS:
             raise JobError(f"kind must be one of {KINDS}")
         self._check_capacity()
-        mode = sandbox_mode or self.cfg.jobs.sandbox
-        await self._check_sandbox(mode)
-        root = await workspace.repo_root(repo)
+        if kind == "web":  # no repo and no agent process: the pipeline runs in here
+            mode, root = "none", ""
+        else:
+            mode = sandbox_mode or self.cfg.jobs.sandbox
+            await self._check_sandbox(mode)
+            root = str(await workspace.repo_root(repo))
         cluster = await self.swap.cluster()
-        route = "research" if kind == "research" else "delegate"
+        route = {"research": "research", "web": "web_research"}.get(kind, "delegate")
         candidates = self.cfg.routes.get(route) or self.cfg.routes.get("delegate", [])
         choice = pick(cluster, candidates, model)
 
@@ -236,7 +242,7 @@ class Manager:
             id=time.strftime("%m%d-%H%M%S-") + secrets.token_hex(2),
             task=task,
             done_when=done_when,
-            repo=str(root),
+            repo=root,
             kind=kind,
             model=choice.model.id,
             machine=choice.model.machine,
@@ -247,6 +253,7 @@ class Manager:
             include_uncommitted=include_uncommitted,
             time_limit_s=time_limit_s or self.cfg.jobs.time_limit_s,
             max_diff_lines=self.cfg.jobs.max_diff_lines,
+            depth=max(1, min(3, depth or 2)),
         )
         job.save()
         self.jobs[job.id] = job
@@ -259,12 +266,13 @@ class Manager:
         job = self.get(job_id)
         if job.state in ACTIVE:
             raise JobError(f"job {job_id} is still {job.state}; wait for it or cancel it")
-        if not (job.dir / "repo").is_dir() or not job.base:
+        if job.kind != "web" and (not (job.dir / "repo").is_dir() or not job.base):
             raise JobError(f"job {job_id} has no clone to work in (it failed while preparing)")
         if not feedback.strip():
             raise JobError("feedback is empty: say what to fix or what to answer")
         self._check_capacity()
-        await self._check_sandbox(job.sandbox)
+        if job.kind != "web":
+            await self._check_sandbox(job.sandbox)
         job.history.append(
             {
                 "attempt": job.attempt,
@@ -299,6 +307,9 @@ class Manager:
 
     async def _run(self, job: Job) -> None:
         """Prepare the clone and image, then run the first attempt."""
+        if job.kind == "web":
+            await self._attempt(job)
+            return
         try:
             repo = job.dir / "repo"
             prep = await workspace.prepare(Path(job.repo), repo, job.include_uncommitted)
@@ -331,6 +342,9 @@ class Manager:
         return brief
 
     async def _attempt(self, job: Job) -> None:
+        if job.kind == "web":
+            await self._web_attempt(job)
+            return
         log = (job.dir / "log.txt").open("a", buffering=1)
         token = ""
         meter: Meter | None = None
@@ -520,6 +534,9 @@ class Manager:
         proc = self.procs.get(job.id)
         if proc:
             asyncio.get_running_loop().create_task(proc.kill())
+        task = self.tasks.get(job.id)
+        if job.kind == "web" and task and task is not asyncio.current_task():
+            task.cancel()  # no process to kill: stop the pipeline where it is waiting
 
     async def _collect(self, job: Job) -> None:
         repo = job.dir / "repo"
@@ -535,6 +552,86 @@ class Manager:
             )
         except workspace.WorkspaceError as e:
             job.error = job.error or str(e)
+
+    async def _web_attempt(self, job: Job) -> None:
+        """Web research: the pipeline in web.py, its model calls budgeted like a job's."""
+        from ai_delegate import web
+        from ai_delegate.swap import SwapError
+
+        job.dir.mkdir(parents=True, exist_ok=True)
+        log = (job.dir / "log.txt").open("a", buffering=1)
+        jobs_cfg = self.cfg.jobs
+        pinned = f"{job.model.split('@', 1)[0]}@{job.machine}"
+        deadline = time.monotonic() + job.time_limit_s
+        max_out = min(self.cfg.max_output_tokens, job.window // 4)
+        start_tokens = job.new_tokens
+
+        def note(msg: str) -> None:
+            log.write(msg + "\n")
+            job.recent = [*job.recent[-11:], msg[:300]]
+            job.save()
+
+        async def ask(system: str, user: str) -> str:
+            if job.requests >= jobs_cfg.max_requests:
+                raise web.ResearchError(f"model call limit reached ({jobs_cfg.max_requests})")
+            if job.new_tokens >= jobs_cfg.max_tokens:
+                raise web.ResearchError(f"token limit reached ({jobs_cfg.max_tokens:,})")
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise web.ResearchError(f"time limit reached ({job.time_limit_s / 60:.0f} min)")
+            messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+            reply = await self.swap.chat(
+                pinned, messages, max_tokens=max_out, temperature=0.2, deadline_s=min(left, 600)
+            )
+            job.requests += 1
+            used_in = reply.prompt_tokens or (len(system) + len(user)) // 4
+            used_out = reply.completion_tokens or len(reply.text) // 4
+            job.new_tokens += used_in + used_out
+            job.tokens_out += used_out
+            if reply.timed_out and not reply.text.strip():
+                raise web.ResearchError("a model call timed out with no answer")
+            return reply.text
+
+        previous: web.Result | None = None
+        state = job.dir / "web.json"
+        if job.feedback and state.is_file():
+            previous = web.Result.load(state)
+        log.write(
+            f"# {job.id} attempt {job.attempt} (web): {job.model} on {job.machine} "
+            f"({job.route}), depth {job.depth}\n"
+        )
+        job.state, job.started = "running", job.started or time.time()
+        job.save()
+        res: web.Result | None = None
+        research = web.Research(self.cfg.web, ask, note, self.web_transport)
+        try:
+            prev_report = (job.history[-1].get("summary", "") if job.history else "") or ""
+            res = await research.run(
+                job.task, job.done_when, job.depth, job.feedback, previous, prev_report
+            )
+            job.summary = res.report
+            (job.dir / "report.md").write_text(res.report)
+        except asyncio.CancelledError:
+            job.stop_reason = job.stop_reason or "cancelled"
+        except (web.ResearchError, SwapError, ValueError) as e:
+            job.error = str(e)
+        except Exception as e:  # noqa: BLE001 - a job's failure is reported, never raised
+            job.error = f"{type(e).__name__}: {e}"
+        finally:
+            res = res or research.result  # partial, when stopped or failed midway
+            if res is not None:
+                res.save(state)
+                job.citations = res.stats()
+                job.tool_calls = res.searches + len(res.pages)
+                outcomes.native(
+                    job.id,
+                    "web_research",
+                    res.stats()["page_chars"] // 4,
+                    f"attempt {job.attempt}: the local models read "
+                    f"{res.stats()['pages_read']} pages (~{res.stats()['page_chars'] // 4:,} "
+                    f"tokens) and made {job.new_tokens - start_tokens:,} new tokens",
+                )
+            self._finish(job, log)
 
     def _finish(self, job: Job, log: Any) -> None:
         if job.stop_reason:

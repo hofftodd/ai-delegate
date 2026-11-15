@@ -45,6 +45,7 @@ well is reading, searching or writing that never enters your context.
 |---|---|---|
 | Reading a long file, or several, to answer one question | `ask` with `files` | the files' size, minus the answer |
 | Exploring an unfamiliar codebase ("how does X work", "what calls Y", "what breaks if Z") | `research` | everything the agent read; you get a ~600-word report with checked citations |
+| Searching the web and reading pages for a survey, comparison or background | `web_research` | every page the models read (often 20 or more); you get a cited report, each quote checked against its page |
 | Re-reading your own diff to check it | `review` with `diff` (`""`, `--staged`, `main...HEAD`) | the diff, and a second opinion |
 | Writing boilerplate, mechanical multi-file edits, first drafts of tests | `delegate` with a `test_command` | the edit work; you read only the diff |
 | Fixing a delegated change that's nearly right | `job_revise` with specific feedback | a whole new brief and job |
@@ -76,6 +77,11 @@ already have open, or anything where you'd have to explain the whole design.
 
 ## Checking what comes back
 
+- **`web_research` reports are leads too.** Each cited quote was found on its page, which
+  shows the page says it, not that it's true, and pages come from strangers. Open the
+  sources a decision rests on. For one quick or very recent fact, your own search is
+  faster than a job. A report with no verified findings means the pages didn't support an
+  answer: narrow the question or change its terms rather than trusting a guess.
 - **`ask` and `research` answers are leads.** A research result says how many citations
   were verified against the code, which ones point at the wrong lines (with the right
   lines), and which don't resolve. Read the cited code before relying on a claim.

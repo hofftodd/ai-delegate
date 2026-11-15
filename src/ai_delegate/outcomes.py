@@ -68,6 +68,11 @@ def log_call(call_id: str, tool: str, model: str, machine: str, **extra: Any) ->
     )
 
 
+def job_tool(kind: object) -> str:
+    """The tool a job of this kind came from."""
+    return {"research": "research", "web": "web_research"}.get(str(kind), "delegate")
+
+
 def lookup(item_id: str) -> dict[str, Any] | None:
     """The call or job an id names: {tool, model, machine}."""
     for rec in reversed(_read("calls.jsonl")):
@@ -76,7 +81,7 @@ def lookup(item_id: str) -> dict[str, Any] | None:
     job = state_dir() / "jobs" / item_id / "job.json"
     if job.is_file():
         j = json.loads(job.read_text())
-        tool = "research" if j.get("kind") == "research" else "delegate"
+        tool = job_tool(j.get("kind"))
         return {
             "id": item_id,
             "tool": tool,
@@ -123,7 +128,7 @@ def stats() -> str:
     for c in calls:
         total[(c.get("tool", ""), f"{c.get('model', '')}@{c.get('machine', '')}")] += 1
     for j in jobs:
-        tool = "research" if j.get("kind") == "research" else "delegate"
+        tool = job_tool(j.get("kind"))
         total[(tool, f"{str(j.get('model', '')).split('@')[0]}@{j.get('machine', '')}")] += 1
     for r in fb.values():  # discarded jobs still count through their feedback
         key = (r.get("tool", ""), f"{str(r.get('model', '')).split('@')[0]}@{r.get('machine', '')}")
@@ -270,7 +275,7 @@ def track_record() -> dict[str, dict[str, Any]]:
             except ValueError:
                 continue
             if j.get("finished") and j.get("started") and j.get("state") == "done":
-                tool = "research" if j.get("kind") == "research" else "delegate"
+                tool = job_tool(j.get("kind"))
                 secs[tool].append(float(j["finished"]) - float(j["started"]))
     rated: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for r in {r["id"]: r for r in _read("feedback.jsonl") if r.get("id")}.values():
