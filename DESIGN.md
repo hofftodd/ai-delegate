@@ -126,6 +126,76 @@ Before building anything, use Houtini LM against ai-swap for a few days of real 
 - **Don't build it if** Claude ends up redoing most delegated work; then the bottleneck is the models, not the plumbing.
 - **Watch during the trial:** that ai-factory runs aren't slowed by swaps the trial causes (the reason to trial between runs).
 
+### Trial: larder2 (2026-11-14)
+
+Claude Code (Opus 5.5) as orchestrator rebuilt ai-factory's last project, larder (Kotlin /
+Spring Boot + PostgreSQL, Angular 22 + Material), from the same three spec files, handing
+the work to the local models. Result: hofftodd/larder2, all 27 acceptance criteria met (the
+workflows checked by hand in the browser, the unit rules by one test per criterion), back end 84 tests at 99.8% line / 85.1% branch coverage, front end 124 tests
+at 95.0% line / 87.9% branch coverage, both green in a fresh clone offline in the sandbox.
+ai-factory got the larder back end done in about ten hours and no front-end feature in
+another 15; this run did both in about four hours of wall time.
+
+**What was delegated.** 18 delegate jobs (every back-end feature, all four pages, two
+dialogs, the 850-line demo data, three polish passes), 2 reviews, 1 ask. 15 jobs on
+deepseek-v4-flash@studio, 3 on thinkingcap-qwen3.8-27b@mini-ubuntu; the ask on flint@studio.
+About 91% of the lines added under `backend/src` and `frontend/src` came in delegated
+commits. `ai-delegate stats` at the end:
+
+| tool | model | rated | kept | fixed | redone | unused |
+|---|---|---|---|---|---|---|
+| delegate | deepseek-v4-flash@studio | 13 | 11 | 2 | 0 | 0 |
+| delegate | thinkingcap-qwen3.8-27b@mini-ubuntu | 3 | 2 | 1 | 0 | 0 |
+| ask | flint@studio | 1 | 1 | 0 | 0 | 0 |
+| review | deepseek-v4-flash@studio | 1 | 0 | 0 | 0 | 1 |
+| review | thinkingcap-qwen3.8-27b@mini-ubuntu | 1 | 0 | 0 | 0 | 1 |
+
+Net saving estimated at 885k tokens against 42k spent on calls (delegate: 886k gross on 36k).
+One kept job (the demo data) is missing from the table: see below.
+
+**What Claude kept for itself.** The sandbox image and test scripts (proved first, per the
+larder post-mortem), the schema, `docs/plan.md` (API contract, unit rules, UI conventions:
+every brief pointed at it), the theme, app shell and shared components, reading every diff,
+running the app and checking every page at 1280/768/375 px, and small fixes (BigDecimal
+scale, a display rule, CSS for tablet and phone, one zoneless test).
+
+**What worked.**
+- Small, complete briefs with a scoped `test_command` and a shared contract file: 14 of 18
+  jobs were used as is. The fixes were small (a division scale, two CSS details, one test).
+- Splitting work across both machines (once the user pointed it out): studio fell to 21 tok/s
+  with two jobs in flight while mini-ubuntu sat idle.
+- Agents reported real setup problems clearly: font inlining breaking the offline `ng build`,
+  a wrong example in a brief, the global coverage threshold failing scoped runs.
+- `job_revise` to correct a confused brief in place (plan/swap job).
+- Proving both suites in a fresh clone in the sandbox before features: none of ai-factory's
+  front-end test failures happened.
+
+**What failed or cost time.**
+- **`review` returned nothing, twice.** deepseek-v4-flash at 600 s on a ~400-line diff and
+  thinkingcap at 900 s on three files both hit the limit with an empty partial answer, while
+  delegate jobs on the same models were fine. The biggest problem found: either nothing
+  streams until the end or reasoning eats the budget. Worth a test with a small diff and
+  logging what comes back.
+- **Default routing put both concurrent jobs on one machine.** `delegate` always picked
+  deepseek-v4-flash@studio while mini-ubuntu was free. Routing could prefer a loaded model
+  on a machine with no job in flight.
+- **Sandbox setup took several rounds:** jobs run as the host uid with `HOME=/tmp/home`, so
+  Gradle caches had to be owned by that uid (Gradle chmods its dirs); Node needed `libatomic1`;
+  the base has no python3/jq. The image's build context is `.ai-delegate/` only and its tag
+  is the Dockerfile's hash, so dependency changes need a sync script and a hash line. A doc
+  section "what a toolchain Dockerfile must do" would have saved most of it.
+- **The first job ran on a broken image** and spent its budget trying to fix Gradle
+  permissions instead of stopping. A preflight that runs `test_command` once before the agent
+  starts (and fails fast) would catch this.
+- **`feedback` after `job_discard` fails** ("no call or job"): the demo-data job's rating was
+  lost. Either keep the ledger entry after discard or warn in `job_discard`.
+- **`job_result` puts the whole diff in Claude's context:** fine for 200 lines, expensive
+  for the 850-line data file and the 1,000-line Plan page. A `stat`/`files` mode would help.
+- **`stats` `uses` column** shows 1 per model while `rated` shows 13: looks like a counting bug.
+- thinkingcap spent most of one 50-minute job reading Angular internals to debug a zoneless
+  test, and hit the limit with one test failing; deepseek did the harder Plan page (CDK drag
+  and drop) in one go.
+
 ## Milestones and open questions
 
 Each milestone is usable on its own; the trial decides whether the later ones happen.
