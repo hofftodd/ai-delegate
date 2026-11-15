@@ -66,3 +66,11 @@ def test_keys_from_env_file_and_environment(tmp_path, monkeypatch):
     assert cfg.api_key == "from-file" and cfg.web.search_token == "tok"
     monkeypatch.setenv("AI_SWAP_API_KEY", "from-env")
     assert config.load(tmp_path / "config.yaml").api_key == "from-env"
+
+
+def test_empty_api_key_in_config_is_no_key(tmp_path, monkeypatch):
+    from ai_delegate import config
+
+    monkeypatch.delenv("AI_SWAP_API_KEY", raising=False)
+    (tmp_path / "config.yaml").write_text("endpoint: http://swap\napi_key:\n")
+    assert config.load(tmp_path / "config.yaml").api_key == ""

@@ -111,7 +111,7 @@ def load(path: Path = CONFIG_PATH, routes_path: Path | None = None) -> Config:
     if path.is_file():
         raw: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
         cfg.source = str(path)
-        cfg.api_key = str(raw.get("api_key", cfg.api_key))
+        cfg.api_key = str(raw.get("api_key") or cfg.api_key)
         ep = raw.get("endpoint", cfg.endpoint)
         cfg.endpoints = [str(e) for e in ep] if isinstance(ep, list) else [str(ep)]
         for tool in ("ask", "review", "delegate", "research", "web_research"):
