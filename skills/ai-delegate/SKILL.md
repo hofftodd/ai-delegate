@@ -22,6 +22,15 @@ well is reading, searching or writing that never enters your context.
 3. **Start the slow work first.** `research` and `delegate` jobs take minutes. Start them
    before you begin your own part, keep working, and check `job_status` between your own
    steps. Two jobs can run at once.
+4. **Spread parallel jobs across machines.** There is more than one model host (for example
+   studio and mini-ubuntu), and default routing can put both jobs on the same one while the
+   other sits idle. When you run two jobs at once, check `capabilities` or `models` for
+   which host each model is on, and pass `model` so each job goes to a different host.
+5. **For a build of more than a few jobs, write the contract first.** Before the first
+   `delegate`, write one file (say `docs/plan.md`) that fixes what the jobs share: the API
+   and types, the data rules, the file layout, the naming and UI conventions. Point every
+   brief at it. This makes larger jobs safe, and it is what keeps work from parallel jobs
+   consistent.
 
 ## What to hand off
 
@@ -43,22 +52,38 @@ already have open, or anything where you'd have to explain the whole design.
 - **Make it complete.** The local model sees only what you send. Name files, functions and
   conventions, and say what "done" means. For `delegate`, give a `test_command` scoped to
   the change (`uv run pytest -q tests/test_x.py`).
-- **Keep jobs small.** One coherent change per job, ideally under 200 changed lines.
+- **Keep jobs small.** One coherent change per job, ideally under 200 changed lines. A job
+  can be bigger (a whole page, a seed-data file) when a written contract fixes its
+  interfaces and its `test_command` covers it.
 - **Poll sparingly.** Each `job_status` result costs tokens. Check between your own steps,
-  not in a loop.
+  not in a loop. If you have nothing else to do, wait cheaply instead: a background shell
+  command that waits until the job's `job.json` under `~/.local/state/ai-delegate/jobs/`
+  stops showing `"state": "running"` costs nothing until it finishes.
 
 ## Checking what comes back
 
 - **`ask` and `research` answers are leads.** A research result says how many citations
   were verified against the code, which ones point at the wrong lines (with the right
   lines), and which don't resolve. Read the cited code before relying on a claim.
-- **`review` findings need checking.** Local models report false positives.
+- **`review` findings need checking.** Local models report false positives. On a large diff
+  `review` can hit its time limit and return nothing, so review one job's diff at a time,
+  not a whole branch, and don't treat an empty result as a pass.
 - **For a job, trust the tests over the summary.** Read the diff in `job_result`. If it's
   nearly right, `job_revise` with exactly what to fix. If it applies cleanly and is right,
-  apply it with the given `git apply` command, run the tests, then `job_discard` it.
+  apply it with the given `git apply` command, run the tests, call `feedback`, and only then
+  `job_discard` it: feedback for a discarded job fails, and the rating is lost.
 - **Sandbox:** jobs run in Docker with no network. A repo's tests need its toolchain in the
-  image (`.ai-delegate/Dockerfile`, FROM ai-factory/executor-base). `sandbox: "local"` has no
-  isolation; use it only with the user's agreement.
+  image (`.ai-delegate/Dockerfile`, FROM ai-factory/executor-base; the build context is
+  `.ai-delegate/` alone). `sandbox: "local"` has no isolation; use it only with the user's
+  agreement. Before the first real job, prove the image: run a tiny `delegate` whose brief
+  changes nothing and whose `test_command` is the real test command. Things that commonly
+  break:
+  - Jobs run as the host's uid with `HOME=/tmp/home`, so caches baked into the image must be
+    owned by that uid (chown them, and remove any Gradle `daemon/` dir).
+  - There is no network, so every dependency (Gradle, npm, pip) must be fetched while the
+    image builds, and the test command must run offline (`--offline`, the lockfile).
+  - The base image is minimal: no python3 or jq, and Node needs `libatomic1`. Write helper
+    scripts in shell, and add system packages to the Dockerfile.
 
 ## Record the outcome
 
