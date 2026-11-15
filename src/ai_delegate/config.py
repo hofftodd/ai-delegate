@@ -48,7 +48,12 @@ class Jobs:
     max_requests: int = 80
     max_tokens: int = 400_000  # new tokens: unseen prompt plus completions
     max_diff_lines: int = 800
-    max_running: int = 2
+    max_running: int = 2  # per machine with the daemon, per session without
+    # Jobs run in a daemon per machine, so they outlive the session that started them; it
+    # exits after this long with no job and no request (0: never). False: in each session's
+    # own process, as before (jobs end with the session).
+    daemon: bool = True
+    daemon_idle_exit_s: float = 1800
     default_context: int = 131_072  # when ai-swap doesn't report a model's window
 
 

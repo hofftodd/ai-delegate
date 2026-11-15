@@ -21,7 +21,9 @@ well is reading, searching or writing that never enters your context.
    needs this conversation.
 3. **Start the slow work first.** `research` and `delegate` jobs take minutes. Start them
    before you begin your own part, keep working, and check `job_status` between your own
-   steps. Two jobs can run at once.
+   steps. Two jobs can run at once per machine. Jobs run in a per-machine daemon, so they
+   outlive this session: a job you started earlier, or another session started, shows in
+   `job_status`, and you can collect, revise or cancel it.
 4. **Spread parallel jobs across machines.** There is more than one model host (for example
    studio and mini-ubuntu), and default routing can put both jobs on the same one while the
    other sits idle. When you run two jobs at once, check `capabilities` or `models` for

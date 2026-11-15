@@ -11,6 +11,9 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="ai-delegate", description=__doc__)
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("serve", help="run the MCP server over stdio (what Claude Code starts)")
+    dm = sub.add_parser("daemon", help="run the job daemon (started on demand by serve)")
+    dm.add_argument("--status", action="store_true", help="say whether one is running")
+    dm.add_argument("--stop", action="store_true", help="stop it once its jobs finish")
     sub.add_parser("models", help="print the models table the models tool returns")
     sub.add_parser("doctor", help="check the config, ai-swap, Docker and the sandbox image")
     sub.add_parser("stats", help="what happened to delegated work: kept, fixed, redone")
@@ -37,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "skill":
         return _skill(args.dest)
+    if args.cmd == "daemon":
+        return _daemon(args.status, args.stop)
 
     from ai_delegate import server
 
@@ -109,6 +114,13 @@ async def _doctor(server) -> int:  # type: ignore[no-untyped-def]
     print(
         f"jobs:     default sandbox {cfg.jobs.sandbox}, limit {cfg.jobs.time_limit_s / 60:.0f} "
         f"min, state in {_state_dir()}"
+    )
+    from ai_delegate import daemon
+
+    print(
+        f"daemon:   {daemon.status_line()}"
+        if cfg.jobs.daemon
+        else "daemon:   off (jobs.daemon: false): jobs end with their session"
     )
     return 0 if ok else 1
 
@@ -186,3 +198,20 @@ def _image(src: str | None) -> int:
 
 def cli() -> None:
     sys.exit(main())
+
+
+def _daemon(status: bool, stop: bool) -> int:
+    from ai_delegate import config, daemon
+
+    if status:
+        print(f"daemon: {daemon.status_line()}")
+        return 0
+    if stop:
+        c = daemon.Client(config.load())
+        if not asyncio.run(c.health()):
+            print("daemon: not running")
+            return 0
+        asyncio.run(c._post_shutdown("idle"))
+        print("daemon: stops once its jobs finish")
+        return 0
+    return daemon.run(config.load())

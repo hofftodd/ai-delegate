@@ -53,6 +53,7 @@ STATE_DIR = Path(os.environ.get("AI_DELEGATE_STATE", "~/.local/state/ai-delegate
 ACTIVE = ("preparing", "running", "testing")
 KINDS = ("change", "research")
 SANDBOXES = ("docker", "host", "local")
+STOPPED_EXIT = 130  # a step skipped or killed because the job was stopped
 # pi's agent dir, as a shell expression: somewhere the sandbox lets it write.
 AGENT_DIRS = {
     "docker": "$HOME/.pi/agent",
@@ -448,6 +449,8 @@ class Manager:
         limit: float | None = None,
         check_diff: bool = False,
     ) -> int:
+        if job.stop_reason:  # stopped (say, cancelled) before this step began: don't start it
+            return STOPPED_EXIT
         if job.sandbox == "docker":
             proc = await sandbox.start_docker(
                 step, job.image or self.cfg.jobs.image, self.cfg.jobs.cpus, self.cfg.jobs.memory
@@ -459,6 +462,8 @@ class Manager:
         else:
             proc = await sandbox.start_local(step)
         self.procs[job.id] = proc
+        if job.stop_reason:  # stopped while the process was starting: _stop found no proc
+            await proc.kill()
         start = job.started or time.time()
         deadline = start + job.time_limit_s if limit is None else time.time() + limit
 
@@ -552,8 +557,8 @@ class Manager:
             return job
         if job.pid != os.getpid():
             raise JobError(
-                f"job {job_id} belongs to another ai-delegate process "
-                f"(pid {job.pid}); cancel it from that session"
+                f"job {job_id} belongs to another ai-delegate process (pid {job.pid}), "
+                "an older daemon or a session with jobs.daemon off; cancel it from there"
             )
         self._stop(job, "cancelled by the caller")
         task = self.tasks.get(job.id)
