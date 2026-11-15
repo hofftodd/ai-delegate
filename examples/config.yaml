@@ -45,7 +45,9 @@ jobs:
   max_requests: 80           # model calls per job
   max_tokens: 400000         # new tokens per job: unseen prompt plus output
   max_diff_lines: 800
-  max_running: 2             # per ai-delegate process (one per Claude Code session)
+  max_running: 2             # per machine (per session with daemon: false)
+  daemon: true               # jobs run in a per-machine daemon and outlive the session
+  daemon_idle_exit_s: 1800   # the daemon exits after this long idle; 0 keeps it up
   default_context: 131072    # when ai-swap doesn't report a model's window
 
 # Measured routing: `ai-delegate routes --write` reads ai-bench's per-machine tables.

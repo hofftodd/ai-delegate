@@ -18,6 +18,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from ai_delegate import config as config_mod
+from ai_delegate import daemon as daemon_mod
 from ai_delegate import jobs as jobs_mod
 from ai_delegate import outcomes
 from ai_delegate.routing import Choice, NoModel, pick
@@ -55,7 +56,10 @@ summarise the change and do not praise it.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 cfg = config_mod.load()
 swap = AiSwap(cfg.endpoints)
-manager = jobs_mod.Manager(cfg, swap)
+# Jobs live in the per-machine daemon (daemon.py) unless jobs.daemon is off.
+manager: jobs_mod.Manager | daemon_mod.Client = (
+    daemon_mod.Client(cfg) if cfg.jobs.daemon else jobs_mod.Manager(cfg, swap)
+)
 mcp = MCPServer("ai-delegate", instructions=INSTRUCTIONS)
 
 
@@ -331,8 +335,15 @@ async def capabilities() -> str:
         "",
         f"Jobs running: {len(running)} of {cfg.jobs.max_running} allowed"
         + (": " + ", ".join(f"{j.id} ({j.kind})" for j in running) if running else "")
-        + f"; sandbox {cfg.jobs.sandbox}.",
+        + f"; sandbox {cfg.jobs.sandbox}"
+        + (
+            "; jobs run in this machine's ai-delegate daemon and outlive this session."
+            if cfg.jobs.daemon
+            else "; jobs end with this session (jobs.daemon off)."
+        ),
     ]
+    if isinstance(manager, daemon_mod.Client) and manager.note:
+        lines.append(f"Note: {manager.note}.")
     sv = outcomes.savings().get("all")
     if sv:
         lines.append(

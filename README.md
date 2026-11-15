@@ -140,10 +140,18 @@ delegate(task, done_when, test_command="uv run pytest -q tests/test_x.py")
 - **Revising.** `job_revise(id, feedback)` runs another attempt in the same clone. The
   agent is told what the previous attempt did and what to fix. The diff stays cumulative
   against the job's base, and each attempt gets fresh budgets.
+- **Jobs outlive the session.** They run in a job daemon, one per user per machine, which the
+  first job call starts on its own (`ai-delegate daemon`, reached over a private Unix socket in
+  the state dir, logging to `daemon.log` there). Close Claude Code and the job keeps going; a
+  later session sees it, and any session on the machine can check, revise, cancel or discard
+  any job. At most 2 jobs run at once per machine (`jobs.max_running`). The daemon exits after
+  30 idle minutes (`jobs.daemon_idle_exit_s`; 0 keeps it up), and a session on newer code
+  replaces an idle one, or lets a busy one finish first. `ai-delegate daemon --status` and
+  `--stop` (once its jobs finish) manage it by hand; `jobs.daemon: false` runs jobs in each
+  session's own process instead, as before.
 - Jobs are kept under `~/.local/state/ai-delegate/jobs/<id>/` (job.json, log.txt,
-  result.patch or report.md, the clone) until `job_discard`, so a result outlives the session. A job
-  whose ai-delegate process ended is marked interrupted. At most 2 jobs run at once per
-  session.
+  result.patch or report.md, the clone) until `job_discard`. A job whose daemon died is
+  marked interrupted.
 
 ## Install
 

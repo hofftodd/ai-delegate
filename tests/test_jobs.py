@@ -347,3 +347,20 @@ def test_host_settings_and_command(tmp_path):
     assert cmd[:4] == ["srt", "-s", str(tmp_path / "s.json"), "-c"]
     assert cmd[4].startswith("unset NO_PROXY no_proxy; export NODE_USE_ENV_PROXY=1 TMPDIR=")
     assert cmd[4].endswith("; exec bash -c 'echo '\"'\"'a b'\"'\"''")
+
+
+async def test_cancel_while_preparing_never_starts_the_agent(env):
+    m, repo, seen = env
+    job = await m.start(
+        "write hello SLOW", "x", repo, model=None, test_command=None,
+        include_uncommitted=True, time_limit_s=60, sandbox_mode=None,
+    )  # fmt: skip
+    assert job.state == "preparing"
+    t0 = asyncio.get_running_loop().time()
+    stopped = await m.cancel(job.id)
+    try:
+        assert asyncio.get_running_loop().time() - t0 < 10  # not the fake agent's 30 s
+        assert stopped.state not in jobs.ACTIVE and "cancelled" in stopped.stop_reason
+        assert seen == []  # the agent never made a model call
+    finally:
+        await m.aclose()

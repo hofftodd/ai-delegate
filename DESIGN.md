@@ -107,7 +107,7 @@ Local models are slow enough that delegation has to be asynchronous: ThinkingCap
 - **Tell the agent its tools.** Give pi its grep, find and ls tools, with rg, fd and jq installed, and say so in the briefing (ai-factory#20).
 - **Don't trust a "no problems" note over the tests.** Act on an agent's report only when the tests agree (ai-factory#17).
 
-## Persistent job daemon (designed, not built)
+## Persistent job daemon (built)
 
 Today Claude Code starts one ai-delegate process per session, over stdio, and that process
 holds everything: the job manager, the gateway, the Docker relay. Three things follow:
@@ -319,7 +319,7 @@ Each milestone is usable on its own; the trial decides whether the later ones ha
 4. **M3, measured routing and the skill (built):** `ai-delegate routes --write` ranks pinned copies (`model@machine`) per tool from ai-bench's per-machine tables into `routes.yaml`, matching on engine, with a name map for the rest. `skills/ai-delegate/SKILL.md` (installed with `ai-delegate skill`) says when to delegate.
 
 5. **After M3 (built 2026-11-13):** `research` (read-only codebase research with citation checking), `job_revise` (another attempt in the same clone, with feedback), `feedback` (outcomes: kept, fixed, redone, unused), and `capabilities` (a live planning briefing). Tool calls feed a token ledger: what each call cost Claude against an estimate of the native cost, net of results rated redone or unused. The server instructions and the skill make saving Claude's tokens part of its goal. The evaluation plan's notes are now `feedback` plus `ai-delegate stats`.
-6. **M4, persistent job daemon (designed 2026-11-15):** move the job tools and the gateway into `ai-delegate daemon`, one per machine, behind the per-session stdio server (see Persistent job daemon). Jobs outlive sessions, limits count per machine, and any session can manage any job. Steps: the daemon and its socket API; the front end's client, auto-start and lock; version handover and idle exit; the job tools switched over; tests; then the skill's polling and cancel text.
+6. **M4, persistent job daemon (built 2026-11-15):** the job tools and the gateway run in `ai-delegate daemon` (`daemon.py`), one per machine, behind the per-session stdio server (see Persistent job daemon). Jobs outlive sessions, limits count per machine, and any session can manage any job. Built as designed, with two details: the daemon binds its socket itself under umask 177, because uvicorn chmods a socket it creates to 0666; and reads (status, results, listings) skip the API, loading `job.json` and the job's files from the shared state dir. Building it found an older bug, fixed with it: a job cancelled while still preparing started its agent anyway. Checked for real: a job started by a front end that then exited ran to completion in the daemon and was collected by another process.
 
 Open questions:
 
