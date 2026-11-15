@@ -279,6 +279,18 @@ def _dur(s: float | None) -> str:
     return f"typically {s:.0f} s" if s < 90 else f"typically {s / 60:.0f} min"
 
 
+def _typical(r: dict[str, Any]) -> str:
+    """'typically 27 min at depth 2, 9 min at depth 1' where runs are split by depth."""
+    depths = r.get("by_depth") or {}
+    if not depths:
+        return _dur(r.get("median_s"))
+    parts = [
+        f"{_dur(v['median_s']).removeprefix('typically ')} at depth {d}"
+        for d, v in sorted(depths.items(), key=lambda dv: (dv[0] != 2, dv[0]))
+    ]
+    return "typically " + ", ".join(parts)
+
+
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
 @metered
 async def capabilities() -> str:
@@ -332,7 +344,7 @@ async def capabilities() -> str:
             if rated
             else ""
         )
-        lines.append(f"- {tool}: {use}. Now {via}, {when}; {_dur(r.get('median_s'))}{rate}.")
+        lines.append(f"- {tool}: {use}. Now {via}, {when}; {_typical(r)}{rate}.")
     running = [j for j in manager.jobs.values() if j.state in jobs_mod.ACTIVE]
     lines += [
         "",

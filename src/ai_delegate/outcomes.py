@@ -260,13 +260,39 @@ def savings_report() -> str:
     return "\n".join(rows)
 
 
+RECENT_RUNS = 20  # "typically" is the median of this many most recent runs
+
+
+def _median(xs: list[float]) -> float | None:
+    xs = sorted(xs)
+    return xs[len(xs) // 2] if xs else None
+
+
+def _attempts(j: dict[str, Any]) -> list[tuple[float, float]]:
+    """(finished, wall seconds) for each attempt of a job that ended: done, stopped or
+    failed alike, since a job that hits its limit took that long too. Cancellations are left
+    out (the caller chose when they ended); so are earlier attempts recorded before history
+    kept their times."""
+    out = []
+    for a in [*(j.get("history") or []), j]:
+        if a.get("state") not in ("done", "stopped", "failed"):
+            continue
+        if str(a.get("end") or a.get("stop_reason") or "").startswith("cancelled"):
+            continue
+        if a.get("finished") and a.get("started"):
+            out.append((float(a["finished"]), float(a["finished"]) - float(a["started"])))
+    return out
+
+
 def track_record() -> dict[str, dict[str, Any]]:
-    """Per tool: typical seconds (median of calls, or of finished job attempts) and how
-    rated results came out."""
+    """Per tool: typical seconds (median of the most recent calls, or job attempts, ended any
+    way but cancelled), web research also by depth, and how rated results came out."""
     secs: dict[str, list[float]] = defaultdict(list)
     for c in _read("calls.jsonl"):
         if c.get("seconds") is not None:
             secs[c.get("tool", "")].append(float(c["seconds"]))
+    runs: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    by_depth: dict[int, list[tuple[float, float]]] = defaultdict(list)
     jroot = state_dir() / "jobs"
     if jroot.is_dir():
         for p in jroot.glob("*/job.json"):
@@ -274,18 +300,31 @@ def track_record() -> dict[str, dict[str, Any]]:
                 j = json.loads(p.read_text())
             except ValueError:
                 continue
-            if j.get("finished") and j.get("started") and j.get("state") == "done":
-                tool = job_tool(j.get("kind"))
-                secs[tool].append(float(j["finished"]) - float(j["started"]))
+            tool = job_tool(j.get("kind"))
+            for run in _attempts(j):
+                runs[tool].append(run)
+                if tool == "web_research" and j.get("depth"):
+                    by_depth[int(j["depth"])].append(run)
+
+    def recent(rs: list[tuple[float, float]]) -> list[float]:
+        return [s for _, s in sorted(rs)[-RECENT_RUNS:]]
+
+    for tool, rs in runs.items():
+        secs[tool] += recent(rs)
     rated: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for r in {r["id"]: r for r in _read("feedback.jsonl") if r.get("id")}.values():
         rated[r.get("tool", "")][r["outcome"]] += 1
     out: dict[str, dict[str, Any]] = {}
     for tool in set(secs) | set(rated):
-        xs = sorted(secs.get(tool, []))
+        xs = secs.get(tool, [])[-RECENT_RUNS:]
         out[tool] = {
-            "median_s": xs[len(xs) // 2] if xs else None,
+            "median_s": _median(xs),
             "runs": len(xs),
             "outcomes": dict(rated.get(tool, {})),
+        }
+    if by_depth:
+        out["web_research"]["by_depth"] = {
+            d: {"median_s": _median(xs), "runs": len(xs)}
+            for d, xs in sorted((d, recent(rs)) for d, rs in by_depth.items())
         }
     return out

@@ -147,8 +147,11 @@ job (kind `web`), so it runs in the daemon and uses `job_status`, `job_result` a
   Verification is about faithfulness to the page, not truth: a verified quote only means
   the page says it.
 - **Budgets:** the job's model calls and new tokens count against `jobs.max_requests` and
-  `jobs.max_tokens`, as for other jobs, and it has the same time limit. Pages are capped at
-  `web.page_chars` of text.
+  `jobs.max_tokens`, as for other jobs, and it has the same time limit. Gathering stops
+  `web.write_reserve_min` (default 4, at most a quarter of the limit) before the time
+  limit, one call short of the call limit, or at the token limit; the report is then
+  written from what was found, marked partial, and the job ends `stopped`. Pages are
+  capped at `web.page_chars` of text.
 - **The native estimate** for the token ledger is the text of the pages read: what Claude
   would have pulled into its context doing this with its own search and fetch.
 - **Routing:** `web_research` has its own candidate list (default: flint,
