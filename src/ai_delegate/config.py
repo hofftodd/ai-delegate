@@ -66,6 +66,9 @@ class Config:
     # ai-swap addresses in order of preference, e.g. the LAN name, then its Tailscale name;
     # the first that answers is used, and a failed connection moves on to the next.
     endpoints: list[str] = field(default_factory=list)
+    # ai-swap's API key, when it requires one (AI_SWAP_API_KEY, or `api_key` here). Sent on
+    # every call to ai-swap and put on the sandboxed agent's requests by the job gateway.
+    api_key: str = ""
     routes: dict[str, list[str]] = field(default_factory=lambda: dict(DEFAULT_ROUTES))
     timeouts: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
     max_input_bytes: int = 400_000  # files and diffs sent with one call
@@ -77,6 +80,20 @@ class Config:
     route_source: dict[str, str] = field(default_factory=dict)
     scores: dict[str, dict[str, Any]] = field(default_factory=dict)
     source: str = "defaults"
+
+
+def read_env_file(path: Path) -> dict[str, str]:
+    """KEY=VALUE lines (comments and blanks ignored), as `keys/render` writes them."""
+    out: dict[str, str] = {}
+    if not path.is_file():
+        return out
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip().strip("'\"")
+    return out
 
 
 def load(path: Path = CONFIG_PATH, routes_path: Path | None = None) -> Config:
@@ -94,6 +111,7 @@ def load(path: Path = CONFIG_PATH, routes_path: Path | None = None) -> Config:
     if path.is_file():
         raw: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
         cfg.source = str(path)
+        cfg.api_key = str(raw.get("api_key", cfg.api_key))
         ep = raw.get("endpoint", cfg.endpoint)
         cfg.endpoints = [str(e) for e in ep] if isinstance(ep, list) else [str(ep)]
         for tool in ("ask", "review", "delegate", "research", "web_research"):
@@ -122,6 +140,16 @@ def load(path: Path = CONFIG_PATH, routes_path: Path | None = None) -> Config:
             if key not in BenchConfig.__dataclass_fields__:
                 raise ValueError(f"{path}: unknown bench setting {key!r}")
             setattr(cfg.bench, key, value)
+    # Keys: the env file next to config.yaml (rendered from 1Password by ai-tools'
+    # keys/render; ai-delegate is started by Claude Code, so it can't rely on the shell's
+    # environment), then the process environment, which wins.
+    keys = read_env_file(path.with_name("env")) | {
+        k: v for k in ("AI_SWAP_API_KEY", "AI_DELEGATE_SEARCH_TOKEN") if (v := os.environ.get(k))
+    }
+    if v := keys.get("AI_SWAP_API_KEY"):
+        cfg.api_key = v
+    if v := keys.get("AI_DELEGATE_SEARCH_TOKEN"):
+        cfg.web.search_token = v
     if env := os.environ.get("AI_DELEGATE_ENDPOINT"):  # one URL, or several comma-separated
         cfg.endpoints = env.split(",")
     cfg.endpoints = [e.strip().rstrip("/") for e in cfg.endpoints or [cfg.endpoint] if e.strip()]

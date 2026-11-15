@@ -39,6 +39,7 @@ import os
 import secrets
 import shutil
 import time
+from contextlib import AbstractAsyncContextManager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -301,7 +302,7 @@ class Manager:
 
     async def _gateway(self) -> Gateway:
         if self.gateway is None:
-            self.gateway = Gateway(lambda: self.swap.endpoint)
+            self.gateway = Gateway(lambda: self.swap.endpoint, api_key=lambda: self.swap.api_key)
             await self.gateway.start(sandbox.gateway_bind_host())
         return self.gateway
 
@@ -344,6 +345,28 @@ class Manager:
         return brief
 
     async def _attempt(self, job: Job) -> None:
+        """One attempt, holding an ai-swap lease on the job's model throughout, so another
+        client's load can't evict it while the agent's tools run between requests."""
+        if job.stop_reason:  # stopped (say, cancelled) before it began: no lease, no load
+            await self._attempt_body(job)
+            return
+        pinned = f"{job.model.split('@', 1)[0]}@{job.machine}"
+        cm = self.swap.lease(pinned, f"ai-delegate/{job.id}", ttl_s=600)
+        held: AbstractAsyncContextManager[Any] | None = cm
+        try:
+            await cm.__aenter__()
+        except Exception as e:  # noqa: BLE001 - no lease is a risk to note, not a failure
+            job.dir.mkdir(parents=True, exist_ok=True)
+            with (job.dir / "log.txt").open("a") as log:
+                log.write(f"# no lease on {pinned}: {e}\n")
+            held = None
+        try:
+            await self._attempt_body(job)
+        finally:
+            if held is not None:
+                await held.__aexit__(None, None, None)
+
+    async def _attempt_body(self, job: Job) -> None:
         if job.kind == "web":
             await self._web_attempt(job)
             return

@@ -8,10 +8,19 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "ai-common"
+version = "0.1.0"
+source = { git = "https://github.com/hofftodd/ai-common.git#880b5ff2b854ea2aaf962a1c4a1d7971edaec8fb" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[[package]]
 name = "ai-delegate"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "ai-common" },
     { name = "httpx" },
     { name = "mcp" },
     { name = "pyyaml" },
@@ -28,6 +37,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ai-common", git = "https://github.com/hofftodd/ai-common.git" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", specifier = ">=2.3.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },

@@ -22,19 +22,18 @@ machines without Docker or srt; results say so.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import os
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+
+from ai_common import sandbox as aisb
 
 WORKSPACE = "/workspace"
 CTL = "/ai-delegate"
@@ -44,29 +43,11 @@ HOST_ALIAS = "host.docker.internal"
 LABEL = "ai-delegate=1"
 
 
-class SandboxError(Exception):
-    pass
-
-
-def docker(*args: str, timeout: float = 120) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["docker", *args], capture_output=True, text=True, timeout=timeout, check=False
-    )
-
-
-def docker_ok() -> str:
-    """'' if Docker answers, else why not."""
-    if not shutil.which("docker"):
-        return "docker is not installed"
-    try:
-        r = docker("info", "--format", "{{.ServerVersion}}", timeout=15)
-    except subprocess.TimeoutExpired:
-        return "docker info timed out"
-    return "" if r.returncode == 0 else (r.stderr.strip() or "docker info failed")[:300]
-
-
-def image_present(image: str) -> bool:
-    return docker("image", "inspect", image, timeout=30).returncode == 0
+# The Docker plumbing is shared with ai-factory through ai-common.
+SandboxError = aisb.SandboxError
+docker = aisb.docker
+docker_ok = aisb.docker_ok
+image_present = aisb.image_present
 
 
 TOOLCHAIN_FILES = (".ai-delegate/Dockerfile", ".ai-factory/Dockerfile")
@@ -114,33 +95,18 @@ def relay_alias(gateway_port: int) -> str:
 def ensure_relay(image: str, gateway_port: int) -> str:
     """Make sure the internal network and this process's relay exist; returns the base
     URL containers use to reach the gateway."""
-    if docker("network", "inspect", NETWORK).returncode != 0:
-        r = docker("network", "create", "--internal", "--label", LABEL, NETWORK)
-        if r.returncode != 0 and "already exists" not in r.stderr:
-            raise SandboxError(f"cannot create network {NETWORK}: {r.stderr.strip()}")
-    name = f"ai-delegate-gw-{gateway_port}"
-    alias = relay_alias(gateway_port)
-    r = docker("inspect", "-f", "{{.State.Running}}", name)
-    if r.returncode == 0 and r.stdout.strip() == "true":
-        return f"http://{alias}:{RELAY_PORT}"
-    docker("rm", "-f", name)
-    r = docker(
-        "run", "-d", "--name", name,
-        "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-        "--memory", "64m", "--pids-limit", "64",
-        "--add-host", f"{HOST_ALIAS}:host-gateway",
-        "--label", LABEL, "--label", "ai-delegate.role=relay",
-        "--label", f"ai-delegate.pid={os.getpid()}",
-        image,
-        "socat", f"TCP-LISTEN:{RELAY_PORT},fork,reuseaddr", f"TCP:{HOST_ALIAS}:{gateway_port}",
-    )  # fmt: skip
-    if r.returncode != 0:
-        raise SandboxError(f"cannot start the gateway relay: {r.stderr.strip()[:300]}")
-    r = docker("network", "connect", "--alias", alias, NETWORK, name)
-    if r.returncode != 0 and "already exists" not in r.stderr:
-        docker("rm", "-f", name)
-        raise SandboxError(f"cannot attach the relay: {r.stderr.strip()[:300]}")
-    return f"http://{alias}:{RELAY_PORT}"
+    relay = aisb.Relay(
+        name=f"ai-delegate-gw-{gateway_port}",
+        alias=relay_alias(gateway_port),
+        network=NETWORK,
+        image=image,
+        labels={
+            "ai-delegate": "1",
+            "ai-delegate.role": "relay",
+            "ai-delegate.pid": str(os.getpid()),
+        },
+    )
+    return aisb.ensure_relay(relay, gateway_port)
 
 
 def remove_relay(gateway_port: int) -> None:
@@ -176,65 +142,24 @@ class Step:
     env: dict[str, str]
 
 
-class Proc:
-    def __init__(self, proc: asyncio.subprocess.Process, container: str | None):
-        self.proc = proc
-        self.container = container
-
-    async def lines(self) -> AsyncIterator[str]:
-        """Output lines, read in chunks: a pi event can carry a whole file on one line,
-        far past asyncio's line limit (ai-factory#15)."""
-        assert self.proc.stdout is not None
-        buf = b""
-        while chunk := await self.proc.stdout.read(65536):
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                yield line.decode(errors="replace")
-        if buf:
-            yield buf.decode(errors="replace")
-
-    async def wait(self) -> int:
-        return await self.proc.wait()
-
-    async def kill(self) -> None:
-        if self.proc.returncode is not None:
-            return
-        if self.container:
-            await asyncio.to_thread(docker, "rm", "-f", self.container)
-        else:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(self.proc.pid, signal.SIGTERM)
-            try:
-                await asyncio.wait_for(self.proc.wait(), 5)
-            except TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(self.proc.pid, signal.SIGKILL)
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(self.proc.wait(), 10)
+Proc = aisb.Proc
 
 
 async def start_docker(step: Step, image: str, cpus: str, memory: str) -> Proc:
-    env = {"HOME": "/tmp/home", "AI_DELEGATE_CTL": CTL, **step.env}
-    args = [
-        "docker", "run", "--rm", "--init", "--name", step.name,
-        "--user", f"{os.getuid()}:{os.getgid()}",
-        "--cpus", cpus, "--memory", memory, "--pids-limit", "1024",
-        "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-        "--network", NETWORK,
-        "-v", f"{step.workspace}:{WORKSPACE}", "-v", f"{step.ctl}:{CTL}:ro",
-        "-w", WORKSPACE,
-        "--label", LABEL, "--label", f"ai-delegate.pid={os.getpid()}",
-    ]  # fmt: skip
-    for k, v in env.items():
-        args += ["-e", f"{k}={v}"]
-    proc = await asyncio.create_subprocess_exec(
-        *args, image, *step.command,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )  # fmt: skip
-    return Proc(proc, step.name)
+    spec = aisb.RunSpec(
+        name=step.name,
+        workspace=step.workspace,
+        ctl_dir=step.ctl,
+        ctl_mount=CTL,
+        image=image,
+        command=step.command,
+        env={"AI_DELEGATE_CTL": CTL, **step.env},
+        labels={"ai-delegate": "1", "ai-delegate.pid": str(os.getpid())},
+        cpus=cpus,
+        memory=memory,
+        network=NETWORK,
+    )
+    return await aisb.start(spec, max_line_bytes=None, cut_label="ai-delegate")
 
 
 async def start_local(step: Step) -> Proc:
@@ -248,7 +173,7 @@ async def start_local(step: Step) -> Proc:
         stderr=asyncio.subprocess.STDOUT,
         start_new_session=True,
     )
-    return Proc(proc, None)
+    return Proc(proc, container=None, max_line_bytes=None)
 
 
 # -- host: srt ------------------------------------------------------------------------------
@@ -345,4 +270,4 @@ async def start_host(step: Step, srt: str, settings: Path, scratch: Path) -> Pro
         stderr=asyncio.subprocess.STDOUT,
         start_new_session=True,
     )
-    return Proc(proc, None)
+    return Proc(proc, container=None, max_line_bytes=None)

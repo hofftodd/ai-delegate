@@ -51,3 +51,18 @@ async def test_git_diff(tmp_path):
     assert "+a = 2" in await server.git_diff(tmp_path, "HEAD")
     with pytest.raises(server.InputError, match="git diff nope failed"):
         await server.git_diff(tmp_path, "nope")
+
+
+def test_keys_from_env_file_and_environment(tmp_path, monkeypatch):
+    from ai_delegate import config
+
+    monkeypatch.delenv("AI_SWAP_API_KEY", raising=False)
+    monkeypatch.delenv("AI_DELEGATE_SEARCH_TOKEN", raising=False)
+    (tmp_path / "config.yaml").write_text("endpoint: http://swap\n")
+    (tmp_path / "env").write_text(
+        "# rendered\nAI_SWAP_API_KEY=from-file\nAI_DELEGATE_SEARCH_TOKEN='tok'\n"
+    )
+    cfg = config.load(tmp_path / "config.yaml")
+    assert cfg.api_key == "from-file" and cfg.web.search_token == "tok"
+    monkeypatch.setenv("AI_SWAP_API_KEY", "from-env")
+    assert config.load(tmp_path / "config.yaml").api_key == "from-env"

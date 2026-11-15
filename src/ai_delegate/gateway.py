@@ -104,10 +104,14 @@ def estimate_tokens(text: str) -> int:
 
 class Gateway:
     def __init__(
-        self, upstream: str | Callable[[], str], transport: httpx.AsyncBaseTransport | None = None
+        self,
+        upstream: str | Callable[[], str],
+        transport: httpx.AsyncBaseTransport | None = None,
+        api_key: Callable[[], str] = lambda: "",
     ):
         # A callable is read per request, so jobs follow ai-swap's endpoint when it fails over.
         self._upstream = upstream
+        self.api_key = api_key
         self.meters: dict[str, Meter] = {}
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=900.0, write=60.0, pool=30.0),
@@ -173,6 +177,13 @@ class Gateway:
         path = request.path_params["path"].lstrip("/")
         url = f"{self.upstream}/{path}"
         headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
+        # The agent holds a dummy key; ai-swap's real one (if any) is added here, on the
+        # host side, so it never enters the sandbox.
+        headers = {
+            k: v for k, v in headers.items() if k.lower() not in ("authorization", "x-api-key")
+        }
+        if key := self.api_key():
+            headers["Authorization"] = f"Bearer {key}"
         try:
             if request.method == "GET":
                 r = await self.client.get(url, headers=headers, params=request.query_params)

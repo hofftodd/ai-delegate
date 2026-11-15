@@ -273,7 +273,7 @@ def run(cfg: Config) -> int:
     sock = socket_path()
     with contextlib.suppress(FileNotFoundError):
         sock.unlink()  # stale: the lock says no daemon owns it
-    manager = jobs_mod.Manager(cfg, AiSwap(cfg.endpoints))
+    manager = jobs_mod.Manager(cfg, AiSwap(cfg.endpoints, api_key=cfg.api_key))
     asyncio.run(Daemon(cfg, manager).serve(sock))
     return 0
 

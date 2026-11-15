@@ -56,7 +56,7 @@ summarise the change and do not praise it.
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 cfg = config_mod.load()
-swap = AiSwap(cfg.endpoints)
+swap = AiSwap(cfg.endpoints, api_key=cfg.api_key)
 # Jobs live in the per-machine daemon (daemon.py) unless jobs.daemon is off.
 manager: jobs_mod.Manager | daemon_mod.Client = (
     daemon_mod.Client(cfg) if cfg.jobs.daemon else jobs_mod.Manager(cfg, swap)

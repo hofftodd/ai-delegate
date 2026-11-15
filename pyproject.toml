@@ -7,6 +7,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "ai-common @ git+https://github.com/hofftodd/ai-common.git",
     "httpx>=0.28.1",
     "mcp>=2.3.0",
     "pyyaml>=6.0.3",
