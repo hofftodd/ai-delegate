@@ -58,3 +58,20 @@ def test_offline_peer_models_absent():
 def test_unknown_explicit_lists_models(cluster):
     with pytest.raises(NoModel, match="no model called 'nope'. Available: big, flint"):
         pick(cluster, [], explicit="nope")
+
+
+def test_swap_names_loaded_variants_without_substituting():
+    st, ms = status(), models()
+    st["node"]["models"].append({"name": "thinkingcap-big", "state": "ready", "memory_gb": 20})
+    st["peers"][0]["node"]["models"].append({"name": "big-q4", "state": "ready", "memory_gb": 1})
+    ms["data"] += [{"id": "thinkingcap-big", "node": "studio"}, {"id": "big-q4", "node": "mini"}]
+    cl = parse_cluster(st, ms)
+    c = pick(cl, [], explicit="big@studio")
+    assert (c.model.id, c.model.machine, c.load) == ("big", "studio", "swap")
+    assert c.variants == ["thinkingcap-big"]  # big-q4 is on another machine
+    assert c.why.endswith("; loaded on studio instead: thinkingcap-big")
+
+
+def test_swap_without_variants_says_nothing_extra(cluster):
+    c = pick(cluster, ["big"])
+    assert c.load == "swap" and c.variants == [] and "instead" not in c.why

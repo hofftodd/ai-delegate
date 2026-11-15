@@ -4,6 +4,7 @@ whole web job through the manager, all against a fake web and a fake model."""
 
 import asyncio
 import json
+import time
 from collections import Counter
 
 import httpx
@@ -306,5 +307,51 @@ async def test_web_job_stops_at_the_call_limit(web_manager, tmp_path):
         time_limit_s=60, sandbox_mode=None, kind="web",
     )  # fmt: skip
     done = await wait_job(m, job.id)
-    assert done.state == "failed" and "model call limit reached (2)" in done.error
+    assert done.state == "stopped" and not done.error
+    assert (
+        done.stop_reason
+        == "partial: stopped at the model call limit (2) after 0 of 2 sub-question(s)"
+    )
     assert done.citations["subquestions"] == 2  # what it got before the limit is kept
+    assert "No verified findings" in (done.dir / "report.md").read_text()
+
+
+async def test_web_job_writes_a_partial_report_at_the_call_limit(web_manager, tmp_path):
+    m, model, _ = web_manager
+    m.cfg.jobs.max_requests = 3  # plan, one read, and the write kept back
+    job = await m.start(
+        "q", "", tmp_path, model=None, test_command=None, include_uncommitted=True,
+        time_limit_s=60, sandbox_mode=None, kind="web",
+    )  # fmt: skip
+    done = await wait_job(m, job.id)
+    assert done.state == "stopped", done.error
+    assert (
+        done.stop_reason
+        == "partial: stopped at the model call limit (3) after 1 of 2 sub-question(s)"
+    )
+    assert model.calls == ["plan", "read", "write"] and done.requests == 3
+    report = (done.dir / "report.md").read_text()
+    assert report.startswith("> **partial: stopped") and "## Sources" in report
+
+
+async def test_web_job_writes_a_partial_report_at_the_time_limit(web_manager, tmp_path):
+    m, model, _ = web_manager
+    answer = model.answer
+
+    def slow_plan(system, user):
+        if system == web.PLAN_SYSTEM:
+            time.sleep(1.6)  # past the soft deadline: 2 s less a quarter kept for the write
+        return answer(system, user)
+
+    model.answer = slow_plan
+    job = await m.start(
+        "q", "", tmp_path, model=None, test_command=None, include_uncommitted=True,
+        time_limit_s=2, sandbox_mode=None, kind="web",
+    )  # fmt: skip
+    done = await wait_job(m, job.id)
+    assert done.state == "stopped", done.error
+    assert (
+        done.stop_reason == "partial: stopped at the time limit (2 s) after 0 of 2 sub-question(s)"
+    )
+    assert model.calls == ["plan"]  # no search after the soft deadline; nothing to write
+    assert (done.dir / "report.md").is_file() and (done.dir / "web.json").is_file()

@@ -22,6 +22,21 @@ class Choice:
     load: str  # "loaded", "fits" (loads into free memory) or "swap" (pushes idle models out)
     why: str
     skipped: list[str] = field(default_factory=list)
+    # On a swap: models already loaded on that machine whose name contains this one's (a
+    # fine-tune or quant of it, say). Reported, never substituted.
+    variants: list[str] = field(default_factory=list)
+
+
+def loaded_variants(cluster: Cluster, m: Model) -> list[str]:
+    """Names of other loaded models on m's machine whose name contains m's base name."""
+    base = m.name.split("@", 1)[0].lower()
+    return sorted(
+        {
+            o.name
+            for o in cluster.models
+            if o.machine == m.machine and o.loaded and o.name != m.name and base in o.name.lower()
+        }
+    )
 
 
 def pick(cluster: Cluster, candidates: list[str], explicit: str | None = None) -> Choice:
@@ -71,6 +86,8 @@ def pick(cluster: Cluster, candidates: list[str], explicit: str | None = None) -
         return Choice(m, "fits", f"not loaded; loads into free memory on {m.machine}", skipped)
 
     m = sorted(pool, key=key)[0][1]
-    return Choice(
-        m, "swap", f"not loaded; loading it makes {m.machine} unload idle models", skipped
-    )
+    why = f"not loaded; loading it makes {m.machine} unload idle models"
+    variants = loaded_variants(cluster, m)
+    if variants:
+        why += f"; loaded on {m.machine} instead: {', '.join(variants)}"
+    return Choice(m, "swap", why, skipped, variants)

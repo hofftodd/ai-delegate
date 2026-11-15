@@ -282,6 +282,8 @@ class Manager:
                 "summary": job.summary,
                 "test_exit": job.test_exit,
                 "diff_lines": job.diff_lines,
+                "started": job.started,
+                "finished": job.finished,
             }
         )
         job.attempt += 1
@@ -571,14 +573,32 @@ class Manager:
             job.recent = [*job.recent[-11:], msg[:300]]
             job.save()
 
+        # Kept back for the write: web.write_reserve_min, but at most a quarter of the limit.
+        reserve = min(self.cfg.web.write_reserve_min * 60, job.time_limit_s / 4)
+        soft_deadline = deadline - reserve
+        limit_text = (
+            f"{job.time_limit_s / 60:.0f} min" if job.time_limit_s >= 60
+            else f"{job.time_limit_s:.0f} s"
+        )  # fmt: skip
+
+        def check() -> None:
+            """Gathering stops here, leaving one call and the reserved time for the write."""
+            if job.requests >= jobs_cfg.max_requests - 1:
+                raise web.OutOfBudget(f"model call limit ({jobs_cfg.max_requests})")
+            if job.new_tokens >= jobs_cfg.max_tokens:
+                raise web.OutOfBudget(f"token limit ({jobs_cfg.max_tokens:,})")
+            if time.monotonic() >= soft_deadline:
+                raise web.OutOfBudget(f"time limit ({limit_text})")
+
         async def ask(system: str, user: str) -> str:
+            if system != web.WRITE_SYSTEM:
+                check()
+            # The write may go over the token limit by its one call (capped at max_out).
             if job.requests >= jobs_cfg.max_requests:
                 raise web.ResearchError(f"model call limit reached ({jobs_cfg.max_requests})")
-            if job.new_tokens >= jobs_cfg.max_tokens:
-                raise web.ResearchError(f"token limit reached ({jobs_cfg.max_tokens:,})")
             left = deadline - time.monotonic()
             if left <= 0:
-                raise web.ResearchError(f"time limit reached ({job.time_limit_s / 60:.0f} min)")
+                raise web.ResearchError(f"time limit reached ({limit_text})")
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             reply = await self.swap.chat(
                 pinned, messages, max_tokens=max_out, temperature=0.2, deadline_s=min(left, 600)
@@ -603,7 +623,7 @@ class Manager:
         job.state, job.started = "running", job.started or time.time()
         job.save()
         res: web.Result | None = None
-        research = web.Research(self.cfg.web, ask, note, self.web_transport)
+        research = web.Research(self.cfg.web, ask, note, self.web_transport, check)
         try:
             prev_report = (job.history[-1].get("summary", "") if job.history else "") or ""
             res = await research.run(
@@ -611,6 +631,8 @@ class Manager:
             )
             job.summary = res.report
             (job.dir / "report.md").write_text(res.report)
+            if res.stopped:
+                job.stop_reason = res.stopped  # stopped, with a partial report
         except asyncio.CancelledError:
             job.stop_reason = job.stop_reason or "cancelled"
         except (web.ResearchError, SwapError, ValueError) as e:

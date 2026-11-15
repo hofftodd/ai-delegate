@@ -29,9 +29,12 @@ MAX_BYTES = 3_000_000
 MAX_REDIRECTS = 3
 TEXT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 
-# (system, user) -> the model's reply text. Raises to abort the job (budget, cancel).
+# (system, user) -> the model's reply text. Raises to abort the job (budget, cancel); raises
+# OutOfBudget, for any call but the write (WRITE_SYSTEM), to stop gathering and write.
 Ask = Callable[[str, str], Awaitable[str]]
 Log = Callable[[str], None]
+# Raises OutOfBudget when gathering should stop; checked before each search and read.
+Check = Callable[[], None]
 
 
 @dataclass
@@ -46,10 +49,24 @@ class WebConfig:
     page_chars: int = 15_000
     fetch_concurrency: int = 4
     fetch_timeout_s: float = 20.0
+    # Minutes kept back from the time limit for writing the report (at most a quarter of
+    # the limit): gathering stops this long before the limit, so a job that runs long still
+    # ends with a (partial) report.
+    write_reserve_min: float = 4.0
 
 
 class ResearchError(Exception):
     pass
+
+
+class OutOfBudget(ResearchError):
+    """Gathering must stop (time, call or token limit), but the report can still be written.
+
+    ``limit`` names what ran out, e.g. "time limit (30 min)"."""
+
+    def __init__(self, limit: str):
+        super().__init__(f"{limit} reached")
+        self.limit = limit
 
 
 # -- search ---------------------------------------------------------------------------------
@@ -268,6 +285,7 @@ class Result:
     findings: list[Finding] = field(default_factory=list)
     searches: int = 0
     bad_citations: list[int] = field(default_factory=list)
+    stopped: str = ""  # why gathering stopped early (the report is partial); not saved
 
     def sources(self) -> list[str]:
         """URLs with at least one verified finding, in first-cited order: source [n]."""
@@ -369,10 +387,13 @@ class Research:
         ask: Ask,
         log: Log = lambda _m: None,
         transport: httpx.AsyncBaseTransport | None = None,
+        check: Check = lambda: None,
     ):
         self.cfg = cfg
         self.ask = ask
         self.log = log
+        self.check = check
+        self._covered = 0  # sub-questions whose first search-and-read pass finished
         self.transport = transport  # tests: fake search and pages
         self.result: Result | None = None  # as far as it got, if stopped midway
 
@@ -394,11 +415,20 @@ class Research:
         if not new:
             raise ResearchError("the model planned no sub-questions")
         self.log(f"plan: {len(new)} sub-question(s)")
-        await self._gather(res, new)
-        for _ in range(max(0, depth - 1)):
-            if not await self._gaps(topic, res, new):
-                break
-        res.report = await self._write(question, scope, followup, previous_report, res)
+        self._covered = 0
+        try:
+            await self._gather(res, new)
+            for _ in range(max(0, depth - 1)):
+                if not await self._gaps(topic, res, new):
+                    break
+        except OutOfBudget as e:
+            n = min(self._covered, len(new))
+            res.stopped = (
+                f"partial: stopped at the {e.limit} after {n} of {len(new)} sub-question(s)"
+            )
+            self.log(res.stopped)
+        report = await self._write(question, scope, followup, previous_report, res)
+        res.report = f"> **{res.stopped}**\n\n{report}" if res.stopped else report
         return res
 
     # -- steps ------------------------------------------------------------------------------
@@ -441,6 +471,7 @@ class Research:
             qs = (queries or {}).get(i, sub.queries)
             hits: list[Hit] = []
             for q in qs:
+                self.check()
                 try:
                     hits += await search(self.cfg, q, self.transport)
                     res.searches += 1
@@ -455,7 +486,10 @@ class Research:
                 if not page.ok:
                     self.log(f"  skip {page.url}: {page.error or 'empty'}")
                     continue
+                self.check()
                 await self._read(res, i, page)
+            if queries is None:
+                self._covered += 1  # first pass over this sub-question finished
 
     def _pick(self, hits: list[Hit], res: Result, sub: Sub) -> list[str]:
         """Unread pages in rank order across the queries, at most two per site."""
