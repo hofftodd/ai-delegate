@@ -12,10 +12,13 @@ import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from ai_common.swap import auth_headers
+from ai_common.swap import lease as swap_lease
 
 ACTIVE = ("ready", "starting")  # loaded, or loading already: using it costs no swap
 
@@ -169,13 +172,18 @@ class AiSwap:
     Tailscale name does."""
 
     def __init__(
-        self, endpoint: str | list[str], transport: httpx.AsyncBaseTransport | None = None
+        self,
+        endpoint: str | list[str],
+        transport: httpx.AsyncBaseTransport | None = None,
+        api_key: str = "",
     ):
         self.endpoints = [
             e.rstrip("/") for e in ([endpoint] if isinstance(endpoint, str) else endpoint)
         ]
         self.endpoint = self.endpoints[0]
         self._transport = transport
+        self.api_key = api_key
+        self._headers = auth_headers(api_key)
 
     async def _failover(self) -> bool:
         """Point at the first endpoint that answers /api/status, current one last; True if
@@ -183,7 +191,9 @@ class AiSwap:
         order = [e for e in self.endpoints if e != self.endpoint] + [self.endpoint]
         for e in order:
             try:
-                async with httpx.AsyncClient(timeout=4.0, transport=self._transport) as c:
+                async with httpx.AsyncClient(
+                    timeout=4.0, transport=self._transport, headers=self._headers
+                ) as c:
                     if (await c.get(f"{e}/api/status")).status_code == 200:
                         self.endpoint = e
                         return True
@@ -192,7 +202,19 @@ class AiSwap:
         return False
 
     def _client(self, timeout: httpx.Timeout | float) -> httpx.AsyncClient:
-        return httpx.AsyncClient(base_url=self.endpoint, timeout=timeout, transport=self._transport)
+        return httpx.AsyncClient(
+            base_url=self.endpoint, timeout=timeout, transport=self._transport,
+            headers=self._headers,
+        )  # fmt: skip
+
+    def lease(self, model: str, owner: str, ttl_s: int = 600) -> AbstractAsyncContextManager[Any]:
+        """Hold an ai-swap lease on ``model`` (an id like ``flint@studio``) while the block
+        runs, so another client's load can't evict it between requests. A no-op against an
+        ai-swap without leases."""
+        return swap_lease(
+            self.endpoint, model, owner, ttl_s=ttl_s, api_key=self.api_key,
+            transport=self._transport,
+        )  # fmt: skip
 
     async def cluster(self, with_speed: bool = False) -> Cluster:
         try:

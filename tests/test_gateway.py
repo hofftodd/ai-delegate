@@ -114,3 +114,27 @@ def test_upstream_can_follow_a_callable():
     current[0] = "http://ts"
     assert gw.upstream == "http://ts"
     assert Gateway("http://x/").upstream == "http://x"
+
+
+async def test_real_key_replaces_the_agents_dummy():
+    headers: list[httpx.Headers] = []
+
+    def h(req: httpx.Request) -> httpx.Response:
+        headers.append(req.headers)
+        usage = {"prompt_tokens": 1, "completion_tokens": 1}
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "ok"}}], "usage": usage}
+        )
+
+    gw = Gateway("http://swap", transport=httpx.MockTransport(h), api_key=lambda: "s3cret")
+    token = gw.register(Meter("m@x", Budget(), lambda why: None))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=gw.app), base_url="http://gw"
+    ) as c:
+        await c.post(
+            f"/g/{token}/v1/chat/completions",
+            json={"model": "m", "messages": []},
+            headers={"Authorization": "Bearer ai-delegate", "x-api-key": "dummy"},
+        )
+    assert headers[0]["authorization"] == "Bearer s3cret"
+    assert "x-api-key" not in headers[0]

@@ -12,22 +12,17 @@ The model call is injected (``Ask``), so the pipeline is tested without a model.
 from __future__ import annotations
 
 import asyncio
-import html
-import ipaddress
 import json
 import re
-import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import httpx
+from ai_common import web as aiweb
 
 USER_AGENT = "ai-delegate-research/1 (+local models; public pages only)"
-MAX_BYTES = 3_000_000
-MAX_REDIRECTS = 3
-TEXT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 
 # (system, user) -> the model's reply text. Raises to abort the job (budget, cancel); raises
 # OutOfBudget, for any call but the write (WRITE_SYSTEM), to stop gathering and write.
@@ -42,6 +37,8 @@ class WebConfig:
     # ai-search (or any SearXNG) base URLs, tried in order: e.g. the LAN name, then a
     # Tailscale name for use away from home.
     search_url: list[str] = field(default_factory=lambda: ["http://mini-ubuntu2.local:8889"])
+    # Sent as "Authorization: Bearer" when ai-search has AI_SEARCH_TOKEN set.
+    search_token: str = ""
     max_subquestions: int = 5
     queries_per_sub: int = 3
     results_per_query: int = 8
@@ -69,130 +66,36 @@ class OutOfBudget(ResearchError):
         self.limit = limit
 
 
-# -- search ---------------------------------------------------------------------------------
+# -- search and fetch -----------------------------------------------------------------------
+# Shared with ai-factory through ai-common: SearXNG search with URL failover, and fetch that
+# checks every redirect hop against public addresses.
 
-
-@dataclass
-class Hit:
-    title: str
-    url: str
-    snippet: str
+Hit = aiweb.Hit
+Page = aiweb.Page
+to_text = aiweb.to_text
 
 
 async def search(
     cfg: WebConfig, query: str, transport: httpx.AsyncBaseTransport | None = None
 ) -> list[Hit]:
     """Top results for one query from the first search URL that answers."""
-    last = ""
-    for base in cfg.search_url:
-        try:
-            async with httpx.AsyncClient(timeout=30, transport=transport) as c:
-                r = await c.get(
-                    f"{base.rstrip('/')}/search",
-                    params={"q": query, "format": "json", "count": str(cfg.results_per_query)},
-                )
-            if r.status_code != 200:
-                last = f"{base}: HTTP {r.status_code} {r.text[:200]}"
-                if r.status_code < 500 and r.status_code != 429:
-                    break  # the service answered: another route won't help
-                continue
-            rows = (r.json() or {}).get("results") or []
-            return [
-                Hit(str(x.get("title", "")).strip(), str(x.get("url", "")),
-                    str(x.get("content", "")).strip())
-                for x in rows[: cfg.results_per_query]
-                if str(x.get("url", "")).startswith(("http://", "https://"))
-            ]  # fmt: skip
-        except (httpx.HTTPError, ValueError) as e:
-            last = f"{base}: {e}"
-    raise ResearchError(f"search failed ({last})")
-
-
-# -- fetch ----------------------------------------------------------------------------------
-
-
-def _public(host: str) -> bool:
-    """Every address the host resolves to is public."""
     try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror as e:
-        raise ResearchError(f"cannot resolve {host}") from e
-    return all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
-
-
-async def _check_url(url: str) -> None:
-    p = urlparse(url)
-    if p.scheme not in ("http", "https") or not p.hostname:
-        raise ResearchError("only http(s) URLs")
-    if not await asyncio.to_thread(_public, p.hostname):
-        raise ResearchError(f"{p.hostname} is not a public address")
-
-
-@dataclass
-class Page:
-    url: str  # as requested (search results and findings refer to this)
-    title: str = ""
-    text: str = ""
-    error: str = ""
-    final: str = ""  # after redirects, if different
-
-    @property
-    def ok(self) -> bool:
-        return bool(self.text) and not self.error
+        return await aiweb.search(
+            cfg.search_url, query, count=cfg.results_per_query, token=cfg.search_token,
+            transport=transport,
+        )  # fmt: skip
+    except aiweb.WebError as e:
+        raise ResearchError(str(e)) from e
 
 
 async def fetch(
     url: str, cfg: WebConfig, transport: httpx.AsyncBaseTransport | None = None
 ) -> Page:
     """One public page as text. Never raises: a failure is the page's ``error``."""
-    try:
-        target = url
-        async with httpx.AsyncClient(
-            timeout=cfg.fetch_timeout_s, follow_redirects=False, transport=transport,
-            headers={"User-Agent": USER_AGENT, "Accept": "text/html,text/plain;q=0.9"},
-        ) as c:  # fmt: skip
-            for _ in range(MAX_REDIRECTS + 1):
-                await _check_url(target)
-                async with c.stream("GET", target) as r:
-                    if r.is_redirect:
-                        target = urljoin(target, r.headers.get("location", ""))
-                        continue
-                    if r.status_code != 200:
-                        return Page(url, error=f"HTTP {r.status_code}")
-                    ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
-                    if ctype and ctype not in TEXT_TYPES:
-                        return Page(url, error=f"not a text page ({ctype})")
-                    body = b""
-                    async for chunk in r.aiter_bytes():
-                        body += chunk
-                        if len(body) > MAX_BYTES:
-                            break
-                    raw = body.decode(r.encoding or "utf-8", errors="replace")
-                    title, text = to_text(raw) if "html" in (ctype or "html") else ("", raw)
-                    text = re.sub(r"\s+", " ", text).strip()
-                    final = target if target != url else ""
-                    return Page(url, title, text[: cfg.page_chars], final=final)
-            return Page(url, error="too many redirects")
-    except ResearchError as e:
-        return Page(url, error=str(e))
-    except (httpx.HTTPError, UnicodeError, ValueError) as e:
-        return Page(url, error=f"{type(e).__name__}: {e}"[:200])
-
-
-_DROP = re.compile(
-    r"(?is)<(script|style|noscript|svg|nav|header|footer|aside|form|template)\b[^>]*>.*?</\1>"
-)
-
-
-def to_text(raw: str) -> tuple[str, str]:
-    """(title, readable text) of an HTML page, standard library only."""
-    m = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw)
-    title = html.unescape(re.sub(r"\s+", " ", m.group(1))).strip() if m else ""
-    body = _DROP.sub(" ", raw)
-    body = re.sub(r"(?is)<!--.*?-->", " ", body)
-    body = re.sub(r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr)\b[^>]*>", "\n", body)
-    body = html.unescape(re.sub(r"(?s)<[^>]+>", " ", body))
-    return title, body
+    return await aiweb.fetch(
+        url, timeout=cfg.fetch_timeout_s, page_chars=cfg.page_chars, user_agent=USER_AGENT,
+        transport=transport,
+    )  # fmt: skip
 
 
 # -- quotes ---------------------------------------------------------------------------------

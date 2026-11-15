@@ -137,7 +137,11 @@ a set of leads with sources to open. Model calls and new tokens count against th
 budgets, as for other jobs.
 
 Away from home, ai-search on mini-ubuntu2 is only reachable if that machine is on your
-tailnet; list its Tailscale name second in `web.search_url`.
+tailnet; list its Tailscale name second in `web.search_url`. If ai-search requires a token
+(`AI_SEARCH_TOKEN` there), give ai-delegate the same value (see Keys below).
+
+Search and fetch come from [ai-common](https://github.com/hofftodd/ai-common), shared with
+ai-factory.
 
 ## Delegated jobs
 
@@ -216,6 +220,19 @@ is used, and a failed connection moves to the next, so a laptop away from home s
 the local models. `AI_DELEGATE_ENDPOINT` (comma-separated) overrides
 the endpoint. Rerun `routes --write` after new ai-bench results; it prints any models it
 couldn't match.
+
+**Keys.** When ai-swap requires an API key or ai-search a token, ai-delegate reads them from
+`~/.config/ai-delegate/env` (`AI_SWAP_API_KEY=…`, `AI_DELEGATE_SEARCH_TOKEN=…`, as ai-tools'
+`keys/render` writes it from 1Password), with the process environment taking precedence;
+`api_key` and `web.search_token` in config.yaml work too. The ai-swap key goes on every call
+to ai-swap; a sandboxed agent only ever holds a dummy key, and the job gateway swaps in the
+real one on the host side.
+
+**Leases.** Each delegated, research and web job holds an ai-swap lease on its model for the
+whole attempt (renewed every few minutes, released at the end), so another client's load
+can't unload the model while the agent's tools run between requests. Against an ai-swap
+without leases this is a no-op; if a lease is refused, the job runs anyway and says so in
+its log.
 
 ## The skill
 

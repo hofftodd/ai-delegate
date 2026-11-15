@@ -9,6 +9,7 @@ from collections import Counter
 
 import httpx
 import pytest
+from ai_common import web as aiweb
 from conftest import models, status
 from test_swap import chunk, sse
 
@@ -55,7 +56,7 @@ def web_handler(hits: Counter):
 def public_hosts(monkeypatch):
     """No real DNS in tests: 10.x and *.internal are private, everything else public."""
     monkeypatch.setattr(
-        web, "_public", lambda host: not (host.startswith("10.") or host.endswith(".internal"))
+        aiweb, "is_public", lambda host: not (host.startswith("10.") or host.endswith(".internal"))
     )
 
 

@@ -64,12 +64,21 @@ def env(tmp_path, monkeypatch):
         )
 
     seen: list[dict] = []
+    leases: list[str] = []  # "take <model> <owner>" / "release <id>", in order
 
     def swap_api(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/api/status":
             return httpx.Response(200, json=status())
         if req.url.path == "/v1/models":
             return httpx.Response(200, json=models())
+        if req.url.path == "/api/leases":
+            body = json.loads(req.content)
+            if "lease_id" not in body:
+                leases.append(f"take {body['model']} {body['owner']}")
+            return httpx.Response(200, json={"lease_id": "L1", "lease": {"expires": "later"}})
+        if req.url.path.startswith("/api/leases/"):
+            leases.append(f"release {req.url.path.rsplit('/', 1)[1]}")
+            return httpx.Response(200, json={"released": True})
         seen.append(json.loads(req.content))
         return httpx.Response(
             200,
@@ -91,6 +100,7 @@ def env(tmp_path, monkeypatch):
         return m.gateway
 
     m._gateway = gateway  # type: ignore[method-assign]
+    m.leases = leases  # type: ignore[attr-defined]  # for the lease test
     return m, repo, seen
 
 
@@ -362,5 +372,20 @@ async def test_cancel_while_preparing_never_starts_the_agent(env):
         assert asyncio.get_running_loop().time() - t0 < 10  # not the fake agent's 30 s
         assert stopped.state not in jobs.ACTIVE and "cancelled" in stopped.stop_reason
         assert seen == []  # the agent never made a model call
+    finally:
+        await m.aclose()
+
+
+async def test_job_holds_a_lease_on_its_model(env):
+    m, repo, _ = env
+    job = await m.start(
+        "write hello", "out.txt exists", repo, model=None, test_command=None,
+        include_uncommitted=True, time_limit_s=60, sandbox_mode=None,
+    )  # fmt: skip
+    done = await wait(m, job.id)
+    try:
+        assert done.state == "done", done.error
+        assert m.leases == [f"take {done.model.split('@')[0]}@{done.machine} ai-delegate/{job.id}",
+                            "release L1"]  # fmt: skip
     finally:
         await m.aclose()
