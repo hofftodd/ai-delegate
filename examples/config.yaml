@@ -2,8 +2,12 @@
 # the model lists: without them, routes.yaml (generated from ai-bench) is used.
 
 # The ai-swap endpoint. Any machine's works: ai-swap forwards to the machine with the model.
-# AI_DELEGATE_ENDPOINT overrides it.
-endpoint: http://studio.local:8080
+# A list is tried in order: the first that answers is used, and a failed connection moves
+# to the next. List the LAN name first and the Tailscale name next, so a laptop away from
+# home still reaches the local models. AI_DELEGATE_ENDPOINT overrides it (comma-separated).
+endpoint:
+  - http://studio.local:8080
+  - http://studio.your-tailnet.ts.net:8080   # its MagicDNS name: tailscale status
 
 # Candidate models per tool, best first. A name matches a model's id, name or alias on any
 # machine ("flint" matches both copies; "flint@mini-ubuntu" only that one). A loaded candidate
@@ -29,7 +33,11 @@ research:
   # models: [deepseek-v4-flash, thinkingcap-qwen3.8-27b, flint]
 
 jobs:
-  sandbox: docker            # or local: pi on the host in the job's clone, no isolation
+  sandbox: docker            # or host: pi on the host under srt (no Docker needed), or
+                             # local: pi on the host in the job's clone, no isolation
+  # srt: srt                 # sandbox-runtime's CLI, for host (npm i -g @anthropic-ai/sandbox-runtime)
+  # host_allow_write: []     # host: extra writable paths, e.g. a tool cache [~/.cache/uv]
+  # host_deny_read: []       # host: extra unreadable paths, on top of credentials and other jobs
   image: ai-factory/executor-base:latest   # a repo's .ai-delegate/Dockerfile builds FROM it
   cpus: "4"
   memory: 8g

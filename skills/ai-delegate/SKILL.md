@@ -93,10 +93,14 @@ already have open, or anything where you'd have to explain the whole design.
   `summary` from the job's `job.json` in `~/.local/state/ai-delegate/jobs/<id>/` (with
   `jq`), `git apply --check` and then `git apply` its `result.patch`, and look at
   `git diff --stat` and the parts that carry risk. Run the tests yourself.
-- **Sandbox:** jobs run in Docker with no network. A repo's tests need its toolchain in the
-  image (`.ai-delegate/Dockerfile`, FROM ai-factory/executor-base; the build context is
-  `.ai-delegate/` alone). `sandbox: "local"` has no isolation; use it only with the user's
-  agreement. Before the first real job, prove the image: run a tiny `delegate` whose brief
+- **Sandbox:** jobs run in Docker with no network by default. A repo's tests need its
+  toolchain in the image (`.ai-delegate/Dockerfile`, FROM ai-factory/executor-base; the
+  build context is `.ai-delegate/` alone). On a machine without Docker, or when the tests
+  need the host's toolchain, use `sandbox: "host"`: the agent runs on the machine under
+  srt, writing only its clone and reaching only its model, with the host's tools and
+  caches (anything else it must write, such as a build cache, goes in
+  `jobs.host_allow_write`). `sandbox: "local"` has no isolation; use it only with the
+  user's agreement. Before the first real job, prove the setup: run a tiny `delegate` whose brief
   changes nothing and whose `test_command` is the real test command. Things that commonly
   break:
   - Jobs run as the host's uid with `HOME=/tmp/home`, so caches baked into the image must be

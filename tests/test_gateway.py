@@ -103,3 +103,14 @@ async def test_repeat_and_token_trips():
 async def test_unknown_token():
     gw = Gateway("http://swap", transport=upstream([]))
     assert (await call(gw, "nope", stream=False)).status_code == 403
+
+
+def test_upstream_can_follow_a_callable():
+    from ai_delegate.gateway import Gateway
+
+    current = ["http://home/"]
+    gw = Gateway(lambda: current[0])
+    assert gw.upstream == "http://home"
+    current[0] = "http://ts"
+    assert gw.upstream == "http://ts"
+    assert Gateway("http://x/").upstream == "http://x"

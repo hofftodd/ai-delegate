@@ -236,3 +236,114 @@ async def test_research_job_reports_and_checks_citations(env):
         assert not (done.dir / "result.patch").exists()
     finally:
         await m.aclose()
+
+
+# -- sandbox "host": pi under srt ------------------------------------------------------------
+
+# Stands in for srt: checks the settings it was given, then runs the command unsandboxed.
+FAKE_SRT = r"""#!PYTHON
+import json, os, sys
+assert sys.argv[1] == "-s" and sys.argv[3] == "-c", sys.argv
+cfg = json.load(open(sys.argv[2]))
+assert cfg["network"]["allowedDomains"][0].startswith("127.0.0.1:"), cfg
+assert os.getcwd() in cfg["filesystem"]["allowWrite"], (os.getcwd(), cfg)
+assert "SECRET_TOKEN" not in os.environ  # the parent's environment is not passed on
+os.execvp("bash", ["bash", "-c", sys.argv[4]])
+"""
+
+
+def _host(env, tmp_path, monkeypatch, srt: str | None = None):
+    m, repo, seen = env
+    if srt is None:
+        fake = tmp_path / "bin" / "srt"
+        fake.write_text(FAKE_SRT.replace("PYTHON", sys.executable))
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+        m._host_ok = ""  # the fake can't pass the real preflight on Linux (bwrap, socat)
+        srt = str(fake)
+    m.cfg.jobs.srt = srt
+    monkeypatch.setenv("SECRET_TOKEN", "do-not-pass")
+    return m, repo, seen
+
+
+async def test_host_job_runs_under_srt(env, tmp_path, monkeypatch):
+    m, repo, _ = _host(env, tmp_path, monkeypatch)
+    job = await m.start(
+        "write hello", "out.txt exists", repo, model=None,
+        test_command="test -f out.txt && echo found", include_uncommitted=True,
+        time_limit_s=60, sandbox_mode="host",
+    )  # fmt: skip
+    done = await wait(m, job.id)
+    try:
+        assert done.state == "done", (done.error, (done.dir / "log.txt").read_text())
+        assert done.sandbox == "host" and done.test_exit == 0
+        assert "+hello" in (done.dir / "result.patch").read_text()
+        settings = json.loads((done.dir / "ctl" / "srt.json").read_text())
+        assert str(done.dir) in settings["filesystem"]["allowRead"]
+        assert any(p.endswith("/.ssh") for p in settings["filesystem"]["denyRead"])
+    finally:
+        await m.aclose()
+
+
+async def test_host_refused_when_srt_unusable(env, tmp_path, monkeypatch):
+    m, repo, _ = env
+    m.cfg.jobs.srt = str(tmp_path / "no-such-srt")
+    with pytest.raises(jobs.JobError, match="host sandbox isn't usable.*not installed"):
+        await m.start(
+            "x", "y", repo, model=None, test_command=None, include_uncommitted=True,
+            time_limit_s=60, sandbox_mode="host",
+        )  # fmt: skip
+    await m.aclose()
+
+
+@pytest.mark.skipif(not os.environ.get("AI_DELEGATE_SRT"), reason="set AI_DELEGATE_SRT=<srt>")
+async def test_host_job_with_real_srt(env, tmp_path, monkeypatch):
+    """The real thing: the fake pi reaches the gateway through srt's proxy, writes in the
+    clone, and can't write outside it or read ~/.ssh."""
+    m, repo, _ = _host(env, tmp_path, monkeypatch, os.environ["AI_DELEGATE_SRT"])
+    outside = tmp_path / "outside.txt"
+    probe = (
+        f"echo x > {outside} 2>/dev/null && echo WROTE-OUTSIDE; "
+        "ls ~/.ssh >/dev/null 2>&1 && echo READ-SSH; "
+        "curl -s -m 5 -o /dev/null https://example.com && echo REACHED-NET; "
+        "test -f out.txt && echo found"
+    )
+    job = await m.start(
+        "write hello", "out.txt exists", repo, model=None, test_command=probe,
+        include_uncommitted=True, time_limit_s=120, sandbox_mode="host",
+    )  # fmt: skip
+    done = await wait_long(m, job.id)
+    try:
+        log = (done.dir / "log.txt").read_text()
+        assert done.state == "done", (done.error, log)
+        assert "+hello" in (done.dir / "result.patch").read_text()
+        assert "found" in done.test_output, done.test_output
+        for leak in ("WROTE-OUTSIDE", "READ-SSH", "REACHED-NET"):
+            assert leak not in done.test_output, done.test_output
+        assert not outside.exists()
+    finally:
+        await m.aclose()
+
+
+async def wait_long(m: jobs.Manager, job_id: str) -> jobs.Job:
+    for _ in range(1200):
+        if m.get(job_id).state not in jobs.ACTIVE:
+            return m.get(job_id)
+        await asyncio.sleep(0.1)
+    raise AssertionError("job did not finish")
+
+
+def test_host_settings_and_command(tmp_path):
+    from ai_delegate import sandbox
+
+    s = sandbox.host_settings(
+        tmp_path / "job", tmp_path / "job" / "repo", 4242, ["~/.cache/x"], ["~/y"]
+    )
+    fs = s["filesystem"]
+    assert s["network"]["allowedDomains"] == ["127.0.0.1:4242"]
+    assert fs["allowWrite"][:2] == [str(tmp_path / "job" / "repo"), str(tmp_path / "job" / "tmp")]
+    assert fs["allowWrite"][2].endswith("/.cache/x") and not fs["allowWrite"][2].startswith("~")
+    assert any(p.endswith("/y") for p in fs["denyRead"])
+    cmd = sandbox.host_command("srt", tmp_path / "s.json", tmp_path, ["bash", "-c", "echo 'a b'"])
+    assert cmd[:4] == ["srt", "-s", str(tmp_path / "s.json"), "-c"]
+    assert cmd[4].startswith("unset NO_PROXY no_proxy; export NODE_USE_ENV_PROXY=1 TMPDIR=")
+    assert cmd[4].endswith("; exec bash -c 'echo '\"'\"'a b'\"'\"''")

@@ -8,8 +8,15 @@ through the gateway's budgets, and nothing else: not the LAN, ai-swap directly, 
 internet. Each ai-delegate process has its own gateway port, so its own relay
 (``ai-delegate-gw-<port>``, reached as ``gw-<port>`` on the network).
 
+Host: the same command as a host process under srt (Anthropic's sandbox-runtime:
+bubblewrap on Linux, Seatbelt on macOS), so it keeps the host's toolchains and caches.
+Writes are limited to the clone and the job's scratch dir; credential stores and other
+jobs can't be read; the network is srt's proxy, which allows only the gateway's
+``127.0.0.1:<port>``. Weaker than Docker (same kernel, same uid, the host's files readable
+by default), much stronger than local.
+
 Local: the same command as a host process group in the clone, with no isolation at all. For
-machines without Docker, or a project whose tests need the host's toolchain; results say so.
+machines without Docker or srt; results say so.
 """
 
 from __future__ import annotations
@@ -17,11 +24,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -231,6 +241,103 @@ async def start_local(step: Step) -> Proc:
     env = {**os.environ, "AI_DELEGATE_CTL": str(step.ctl), **step.env}
     proc = await asyncio.create_subprocess_exec(
         *step.command,
+        cwd=step.workspace,
+        env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    return Proc(proc, None)
+
+
+# -- host: srt ------------------------------------------------------------------------------
+
+# Never readable from a host-sandboxed job, whatever the repo: credentials, and the state of
+# ai-delegate itself (other jobs' clones; the job's own dir is let back in).
+HOST_DENY_READ = (
+    "~/.ssh", "~/.gnupg", "~/.aws", "~/.azure", "~/.kube", "~/.docker", "~/.netrc",
+    "~/.npmrc", "~/.pypirc", "~/.git-credentials", "~/.password-store",
+    "~/.config/gh", "~/.config/gcloud", "~/.config/ai-delegate", "~/.local/state/ai-delegate",
+    "~/.claude", "~/.claude.json", "~/Library/Keychains",
+)  # fmt: skip
+# The only variables a host job inherits: no tokens or keys from the parent's environment.
+HOST_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TZ")
+HOST_TOOLS_LINUX = ("bwrap", "socat", "rg")  # srt's own dependencies on Linux
+
+
+def _expand(path: str) -> str:
+    return str(Path(path).expanduser())
+
+
+def host_settings(
+    job_dir: Path, workspace: Path, gateway_port: int, allow_write: list[str], deny_read: list[str]
+) -> dict[str, object]:
+    """srt's settings for one job: write the clone and the job's scratch dir, read anything
+    but HOST_DENY_READ, reach only the gateway."""
+    return {
+        "network": {"allowedDomains": [f"127.0.0.1:{gateway_port}"], "deniedDomains": []},
+        "filesystem": {
+            "denyRead": [_expand(p) for p in (*HOST_DENY_READ, *deny_read)],
+            "allowRead": [str(job_dir)],
+            "allowWrite": [str(workspace), str(job_dir / "tmp"), *map(_expand, allow_write)],
+            "denyWrite": [],
+        },
+    }
+
+
+def host_ok(srt: str) -> str:
+    """'' if srt can run a command here, else why not (missing tools, or a kernel that
+    refuses unprivileged user namespaces, as Ubuntu 24.04 does by default)."""
+    if not shutil.which(srt):
+        return f"{srt} is not installed (npm i -g @anthropic-ai/sandbox-runtime)"
+    if sys.platform.startswith("linux"):
+        missing = [t for t in HOST_TOOLS_LINUX if not shutil.which(t)]
+        if missing:
+            return f"srt needs {', '.join(missing)} (apt install bubblewrap socat ripgrep)"
+    with tempfile.TemporaryDirectory(prefix="ai-delegate-srt-") as d:
+        settings = Path(d) / "srt.json"
+        empty: dict[str, dict[str, list[str]]] = {
+            "network": {"allowedDomains": [], "deniedDomains": []},
+            "filesystem": {"denyRead": [], "allowWrite": [], "denyWrite": []},
+        }  # srt refuses a file missing any of these keys
+        settings.write_text(json.dumps(empty))
+        try:
+            r = subprocess.run(
+                [srt, "-s", str(settings), "-c", "true"],
+                capture_output=True, text=True, timeout=60, check=False,
+            )  # fmt: skip
+        except subprocess.TimeoutExpired:
+            return "srt timed out running `true`"
+    if r.returncode != 0:
+        why = (r.stderr.strip() or r.stdout.strip() or f"exit {r.returncode}")[-400:]
+        hint = (
+            " (on Ubuntu 24.04+: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0)"
+            if "ermission" in why or "uid map" in why
+            else ""
+        )
+        return f"srt can't run a sandboxed command: {why}{hint}"
+    return ""
+
+
+def host_command(srt: str, settings: Path, scratch: Path, command: list[str]) -> list[str]:
+    """``command`` under srt. srt sets NO_PROXY to cover 127.0.0.1, which would send the
+    gateway call around the proxy into a refused connection, so it is unset inside; Node
+    (pi) needs NODE_USE_ENV_PROXY to use the proxy at all. TMPDIR is set inside too: srt
+    puts its own sockets in TMPDIR, and the job's path is too long for one on macOS."""
+    inner = (
+        f"unset NO_PROXY no_proxy; export NODE_USE_ENV_PROXY=1 TMPDIR={shlex.quote(str(scratch))}"
+        "; exec " + shlex.join(command)
+    )
+    return [srt, "-s", str(settings), "-c", inner]
+
+
+async def start_host(step: Step, srt: str, settings: Path, scratch: Path) -> Proc:
+    scratch.mkdir(exist_ok=True)
+    env = {k: os.environ[k] for k in HOST_ENV if k in os.environ}
+    env |= {"AI_DELEGATE_CTL": str(step.ctl), **step.env}
+    proc = await asyncio.create_subprocess_exec(
+        *host_command(srt, settings, scratch, step.command),
         cwd=step.workspace,
         env=env,
         stdin=asyncio.subprocess.DEVNULL,

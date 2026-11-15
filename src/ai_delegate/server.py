@@ -54,7 +54,7 @@ summarise the change and do not praise it.
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 cfg = config_mod.load()
-swap = AiSwap(cfg.endpoint)
+swap = AiSwap(cfg.endpoints)
 manager = jobs_mod.Manager(cfg, swap)
 mcp = MCPServer("ai-delegate", instructions=INSTRUCTIONS)
 
@@ -527,8 +527,9 @@ async def delegate(
         str | None,
         Field(
             description="'docker' (default): a container with only the job's clone and no "
-            "network but its model. 'local': pi runs on this machine in the clone with no "
-            "isolation, for tests that need the host's toolchain."
+            "network but its model. 'host': pi runs on this machine under srt, with the "
+            "host's toolchains, writing only the clone, reaching only its model. 'local': "
+            "pi runs on this machine in the clone with no isolation."
         ),
     ] = None,
 ) -> str:
@@ -552,7 +553,7 @@ async def delegate(
         return f"Error: {e}"
     except Exception as e:  # workspace errors and the like, reported, not raised
         return f"Error: {type(e).__name__}: {e}"
-    warn = "" if job.sandbox == "docker" else " UNSANDBOXED (local)."
+    warn = " UNSANDBOXED (local)." if job.sandbox == "local" else ""
     return (
         f"Started job {job.id}: {job.model} on {job.machine} ({job.route}), sandbox "
         f"{job.sandbox}.{warn} Limit {job.time_limit_s / 60:.0f} min. "
@@ -625,6 +626,10 @@ async def job_result(job_id: str) -> str:
     ]
     if j.sandbox == "local":
         out.append("Ran UNSANDBOXED: the agent had this machine's full access.")
+    elif j.sandbox == "host":
+        out.append(
+            "Ran on this machine under srt: writes limited to its clone, network to its model."
+        )
     elif j.image:
         out.append(f"Sandbox image: {j.image}.")
     if j.history:
@@ -755,7 +760,8 @@ async def research(
         float | None, Field(description="Wall-clock limit in minutes (default 30).", gt=0)
     ] = None,
     sandbox: Annotated[
-        str | None, Field(description="'docker' (default) or 'local'; the agent can only read.")
+        str | None,
+        Field(description="'docker' (default), 'host' (srt) or 'local'; the agent can only read."),
     ] = None,
 ) -> str:
     """Have a local agent explore the codebase and answer a question: it finds and reads the
