@@ -157,3 +157,40 @@ def test_config_endpoint_list_and_env(tmp_path, monkeypatch):
     assert config.load(path, tmp_path / "routes.yaml").endpoints == ["http://one:8080"]
     monkeypatch.setenv("AI_DELEGATE_ENDPOINT", "http://a, http://b/")
     assert config.load(path, tmp_path / "routes.yaml").endpoints == ["http://a", "http://b"]
+
+
+async def test_chat_sends_extra_fields():
+    seen = {}
+
+    def h(req):
+        seen.update(json.loads(req.content))
+        return httpx.Response(200, text=sse(chunk(content="ok", finish="stop")))
+
+    await client(h).chat(
+        "m", [], max_tokens=100, temperature=None, deadline_s=5, extra={"thinking_budget": 75}
+    )
+    assert seen["thinking_budget"] == 75 and seen["max_tokens"] == 100
+
+
+async def test_chat_stops_a_looping_answer():
+    def h(req):
+        body = sse(
+            chunk(content="- [medium] x = 1"),
+            *[chunk(content="0" * 50) for _ in range(40)],
+            chunk(content="never reached", finish="stop"),
+        )
+        return httpx.Response(200, text=body)
+
+    r = await client(h).chat("m", [], max_tokens=100, temperature=0.2, deadline_s=5)
+    assert r.looped and r.finish == "loop"
+    assert r.text == "- [medium] x = 10 […]"
+
+
+def test_loop_unit_needs_a_long_run():
+    from ai_delegate.swap import _loop_unit
+
+    assert _loop_unit("ab" * 300) == "ab" or _loop_unit("ab" * 300) == "ba"
+    assert _loop_unit("ok " * 50) is None  # 150 chars: too short to call a loop
+    assert _loop_unit("x = 1\n" * 100) is not None
+    assert _loop_unit("A normal sentence that does not repeat. " + "word " * 10) is None
+    assert _loop_unit(" " * 1000) is None  # whitespace padding is not a loop

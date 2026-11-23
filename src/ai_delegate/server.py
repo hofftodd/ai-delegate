@@ -166,13 +166,18 @@ async def run(
     except (SwapError, NoModel) as e:
         return f"Error: {e}"
     m = choice.model
+    settings = config_mod.settings_for(cfg, m.matches)
+    window = settings.context or m.ctx
     approx_in = len(user.encode()) // 3 + (len(system) // 3 if system else 0)
-    if m.ctx and approx_in > m.ctx * 3 // 4:
+    if window and approx_in > window * 3 // 4:
         return (
             f"Error: about {approx_in:,} tokens of input is too much for {m.id}'s "
-            f"{m.ctx:,}-token context; send less, or name a model with a larger context"
+            f"{window:,}-token context; send less, or name a model with a larger context"
         )
-    budget = min(cfg.max_output_tokens, m.ctx // 4) if m.ctx else min(cfg.max_output_tokens, 16_384)
+    budget = (
+        min(cfg.max_output_tokens, window // 4) if window else min(cfg.max_output_tokens, 16_384)
+    )
+    extra = request_extra(settings, budget)
     deadline = timeout_s or cfg.timeouts.get(tool, 300.0)
 
     note = f"{m.id} on {m.machine} ({choice.why})"
@@ -192,6 +197,7 @@ async def run(
             temperature=temperature,
             deadline_s=deadline,
             progress=progress,
+            extra=extra,
         )
     except SwapError as e:
         return f"Error from {note}: {e}"
@@ -211,6 +217,15 @@ async def run(
     return render(reply, choice, budget, deadline, call_id)
 
 
+def request_extra(settings: config_mod.ModelSettings, budget: int) -> dict[str, Any]:
+    """The extra request fields for a model: its params, and its thinking budget as a share
+    of this reply's output budget."""
+    extra = dict(settings.params)
+    if settings.thinking_budget:
+        extra["thinking_budget"] = int(budget * settings.thinking_budget)
+    return extra
+
+
 def render(reply: Reply, choice: Choice, budget: int, deadline: float, call_id: str = "") -> str:
     m = choice.model
     warn: list[str] = []
@@ -218,6 +233,11 @@ def render(reply: Reply, choice: Choice, budget: int, deadline: float, call_id: 
         warn.append(
             f"Stopped at the {deadline:.0f} s time limit; the answer below is partial. "
             "Pass a larger timeout_s, or a faster model."
+        )
+    if reply.looped:
+        warn.append(
+            f"{m.id} started repeating itself, so the answer was stopped there and the "
+            "repeated text trimmed; check the last finding."
         )
     if reply.finish == "length":
         if not reply.text.strip() and reply.reasoning_chars:

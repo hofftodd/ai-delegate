@@ -74,3 +74,33 @@ def test_empty_api_key_in_config_is_no_key(tmp_path, monkeypatch):
     monkeypatch.delenv("AI_SWAP_API_KEY", raising=False)
     (tmp_path / "config.yaml").write_text("endpoint: http://swap\napi_key:\n")
     assert config.load(tmp_path / "config.yaml").api_key == ""
+
+
+def test_model_settings_from_config(tmp_path):
+    from ai_delegate import config
+
+    (tmp_path / "config.yaml").write_text(
+        "models:\n"
+        "  qwen3.8-flash-next:\n"
+        "    context: 262144\n"
+        "    thinking_budget: 0.75\n"
+        "    params: {top_k: 20}\n"
+    )
+    cfg = config.load(tmp_path / "config.yaml")
+    s = config.settings_for(cfg, lambda w: w == "qwen3.8-flash-next")
+    assert (s.context, s.thinking_budget, s.params) == (262144, 0.75, {"top_k": 20})
+    assert config.settings_for(cfg, lambda w: False).context is None
+    assert server.request_extra(s, 32768) == {"top_k": 20, "thinking_budget": 24576}
+    assert server.request_extra(config.ModelSettings(), 32768) == {}
+
+
+@pytest.mark.parametrize(
+    "section, message",
+    [("    thinking_budget: 2\n", "between 0 and 1"), ("    budget: 1\n", "unknown setting")],
+)
+def test_model_settings_rejects_bad_values(tmp_path, section, message):
+    from ai_delegate import config
+
+    (tmp_path / "config.yaml").write_text("models:\n  m:\n" + section)
+    with pytest.raises(ValueError, match=message):
+        config.load(tmp_path / "config.yaml")

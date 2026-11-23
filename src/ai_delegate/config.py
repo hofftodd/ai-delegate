@@ -61,6 +61,20 @@ class Jobs:
 
 
 @dataclass
+class ModelSettings:
+    """Per-model request settings (config.yaml `models:`), for what ai-swap can't say."""
+
+    # The context window, when ai-swap doesn't report one (oMLX models show "?").
+    context: int | None = None
+    # A thinking model's share of the output budget for reasoning, sent per request as
+    # `thinking_budget` (oMLX forces </think> there). Without it a thinking model can spend
+    # the whole budget reasoning and write no answer.
+    thinking_budget: float | None = None
+    # Extra fields merged into every chat request to this model.
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class Config:
     endpoint: str = "http://studio.local:8080"  # the first of endpoints
     # ai-swap addresses in order of preference, e.g. the LAN name, then its Tailscale name;
@@ -78,6 +92,8 @@ class Config:
     web: WebConfig = field(default_factory=WebConfig)
     # Where each tool's list came from: "defaults", "ai-bench (<date>)" or "config.yaml".
     route_source: dict[str, str] = field(default_factory=dict)
+    # Model name (as in a route: "flint", "flint@studio") -> its request settings.
+    models: dict[str, ModelSettings] = field(default_factory=dict)
     scores: dict[str, dict[str, Any]] = field(default_factory=dict)
     source: str = "defaults"
 
@@ -123,6 +139,19 @@ def load(path: Path = CONFIG_PATH, routes_path: Path | None = None) -> Config:
                 cfg.timeouts[tool] = float(section["timeout_s"])
         cfg.max_input_bytes = int(raw.get("max_input_bytes", cfg.max_input_bytes))
         cfg.max_output_tokens = int(raw.get("max_output_tokens", cfg.max_output_tokens))
+        for name, section in (raw.get("models") or {}).items():
+            section = section or {}
+            unknown = set(section) - set(ModelSettings.__dataclass_fields__)
+            if unknown:
+                raise ValueError(f"{path}: unknown setting(s) {sorted(unknown)} for model {name!r}")
+            tb = section.get("thinking_budget")
+            if tb is not None and not 0 < float(tb) < 1:
+                raise ValueError(f"{path}: {name}.thinking_budget is a share between 0 and 1")
+            cfg.models[str(name)] = ModelSettings(
+                context=int(section["context"]) if section.get("context") else None,
+                thinking_budget=float(tb) if tb is not None else None,
+                params=dict(section.get("params") or {}),
+            )
         for key, value in (raw.get("jobs") or {}).items():
             if key not in Jobs.__dataclass_fields__:
                 raise ValueError(f"{path}: unknown jobs setting {key!r}")
@@ -157,3 +186,12 @@ def load(path: Path = CONFIG_PATH, routes_path: Path | None = None) -> Config:
         raise ValueError("endpoint is empty")
     cfg.endpoint = cfg.endpoints[0]
     return cfg
+
+
+def settings_for(cfg: Config, matches: Any) -> ModelSettings:
+    """The settings of the first `models:` entry a model matches (`matches` is its
+    Model.matches), or none."""
+    for name, settings in cfg.models.items():
+        if matches(name):
+            return settings
+    return ModelSettings()

@@ -153,6 +153,8 @@ class Reply:
     seconds: float = 0.0
     first_token_s: float | None = None
     timed_out: bool = False
+    # Stopped because the answer kept repeating a short run of text (see _loop_unit).
+    looped: bool = False
 
     @property
     def tps(self) -> float | None:
@@ -261,6 +263,7 @@ class AiSwap:
         temperature: float | None,
         deadline_s: float,
         progress: Progress | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> Reply:
         """Stream one completion. Past ``deadline_s`` it returns what it has, marked timed out."""
         body: dict[str, Any] = {
@@ -272,10 +275,13 @@ class AiSwap:
         }
         if temperature is not None:
             body["temperature"] = temperature
+        body.update(extra or {})
         reply = Reply(text="")
         parts: list[str] = []
         start = time.monotonic()
         last_note = start
+        tail, unseen = "", 0
+        unit: str | None = None
         # A model being loaded can take minutes before the first byte, so only the overall
         # deadline bounds the wait; connect stays short so a dead endpoint fails fast.
         timeout = httpx.Timeout(deadline_s, connect=10.0)
@@ -310,8 +316,15 @@ class AiSwap:
                             reply.reasoning_chars += len(thought)
                         if text := delta.get("content"):
                             parts.append(text)
+                            tail = (tail + text)[-LOOP_TAIL:]
+                            unseen += len(text)
                         if ch.get("finish_reason"):
                             reply.finish = ch["finish_reason"]
+                    if unseen >= 64:
+                        unseen = 0
+                        if unit := _loop_unit(tail):
+                            reply.looped, reply.finish = True, "loop"
+                            break
                     now = time.monotonic()
                     if progress and now - last_note >= 2.0:
                         last_note = now
@@ -322,8 +335,33 @@ class AiSwap:
         except httpx.HTTPError as e:
             raise SwapError(f"request to {model} through {self.endpoint} failed: {e}") from e
         reply.text = "".join(parts)
+        if unit:
+            while reply.text.endswith(unit * 2):
+                reply.text = reply.text[: -len(unit)]
+            reply.text += " […]"
         reply.seconds = time.monotonic() - start
         return reply
+
+
+# A reply whose last LOOP_RUN characters (at least LOOP_REPEATS copies) are one unit of up
+# to LOOP_UNIT characters repeated is stuck: near-greedy decoding can loop until the output
+# budget runs out ("0000…"), so chat stops there and trims the run to one copy.
+LOOP_UNIT = 100
+LOOP_RUN = 400
+LOOP_REPEATS = 5
+LOOP_TAIL = LOOP_UNIT * LOOP_REPEATS + LOOP_RUN
+
+
+def _loop_unit(tail: str) -> str | None:
+    """The unit the end of `tail` keeps repeating, or None."""
+    for size in range(1, LOOP_UNIT + 1):
+        run = max(LOOP_RUN, size * LOOP_REPEATS)
+        if len(tail) < run:
+            break
+        unit = tail[-size:]
+        if unit.strip() and tail[-run:] == (unit * (run // size + 1))[-run:]:
+            return unit
+    return None
 
 
 def _error_text(r: httpx.Response) -> str:

@@ -25,6 +25,17 @@ max_input_bytes: 400000
 # Output budget per reply: a quarter of the model's context, capped here (ai-factory#16).
 max_output_tokens: 32768
 
+# Per-model request settings, for what ai-swap can't report. A name matches as in a
+# route ("flint", "flint@studio"). context: the window when ai-swap shows "?".
+# thinking_budget: a thinking model's share of the output budget for reasoning, sent per
+# request as `thinking_budget` (oMLX then forces the answer); without it a thinking model
+# can reason until the output budget runs out and write nothing. params: extra fields
+# merged into every request (they override the tool's temperature).
+# models:
+#   qwen3.8-flash-next:
+#     context: 262144
+#     thinking_budget: 0.75
+
 # Delegated jobs and research. Candidates, as for ask and review (routes --write
 # generates them).
 delegate:
