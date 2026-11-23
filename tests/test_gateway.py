@@ -138,3 +138,28 @@ async def test_real_key_replaces_the_agents_dummy():
         )
     assert headers[0]["authorization"] == "Bearer s3cret"
     assert "x-api-key" not in headers[0]
+
+
+async def test_model_settings_go_on_every_call():
+    seen: list[dict] = []
+    gw = Gateway("http://swap", transport=upstream(seen, prompt=100, completion=10))
+    m = Meter(
+        "flash",
+        Budget(),
+        lambda why: None,
+        extra={"top_k": 20},
+        thinking_share=0.75,
+        max_output=32768,
+    )
+    tok = gw.register(m)
+    await call(gw, tok, stream=True)
+    await call(gw, tok, stream=False)
+    for body in seen:
+        assert body["top_k"] == 20 and body["thinking_budget"] == 24576
+
+
+async def test_no_settings_adds_nothing():
+    seen: list[dict] = []
+    gw = Gateway("http://swap", transport=upstream(seen, prompt=100, completion=10))
+    await call(gw, gw.register(Meter("flint", Budget(), lambda why: None)), stream=False)
+    assert "thinking_budget" not in seen[0] and "top_k" not in seen[0]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import inspect
 import json
@@ -177,6 +178,8 @@ async def run(
     budget = (
         min(cfg.max_output_tokens, window // 4) if window else min(cfg.max_output_tokens, 16_384)
     )
+    if settings.thinking_budget and tool in cfg.tool_thinking:
+        settings = dataclasses.replace(settings, thinking_budget=cfg.tool_thinking[tool])
     extra = request_extra(settings, budget)
     deadline = timeout_s or cfg.timeouts.get(tool, 300.0)
 

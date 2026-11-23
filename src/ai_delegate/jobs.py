@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_delegate import citations, outcomes, pi, sandbox, workspace
-from ai_delegate.config import Config, settings_for
+from ai_delegate.config import Config, ModelSettings, settings_for
 from ai_delegate.gateway import Budget, Gateway, Meter
 from ai_delegate.routing import pick
 from ai_delegate.swap import AiSwap
@@ -383,10 +383,16 @@ class Manager:
             ctl = job.dir / "ctl"
             ctl.mkdir(exist_ok=True)
             gw = await self._gateway()
+            pinned = f"{job.model.split('@', 1)[0]}@{job.machine}"
+            settings = self._settings(job, pinned)
+            max_out = min(self.cfg.max_output_tokens, job.window // 4)
             meter = Meter(
-                model=f"{job.model.split('@', 1)[0]}@{job.machine}",
+                model=pinned,
                 budget=Budget(self.cfg.jobs.max_requests, self.cfg.jobs.max_tokens),
                 on_trip=lambda why: self._stop(job, why),
+                extra=dict(settings.params),
+                thinking_share=settings.thinking_budget,
+                max_output=max_out,
             )
             token = gw.register(meter)
             if job.sandbox == "docker":
@@ -403,7 +409,6 @@ class Manager:
                     job.dir, repo, gw.port, j.host_allow_write, j.host_deny_read
                 )
                 (ctl / "srt.json").write_text(json.dumps(settings, indent=2))
-            max_out = min(self.cfg.max_output_tokens, job.window // 4)
             (ctl / "models.json").write_text(
                 json.dumps(pi.models_config(f"{base}/g/{token}/v1", job.model, job.window, max_out))
             )
@@ -582,6 +587,11 @@ class Manager:
         except workspace.WorkspaceError as e:
             job.error = job.error or str(e)
 
+    def _settings(self, job: Job, pinned: str) -> ModelSettings:
+        """The job's model's request settings (config.yaml models:)."""
+        names = {job.model.lower(), pinned.lower(), pinned.split("@", 1)[0].lower()}
+        return settings_for(self.cfg, lambda w: w.lower() in names)
+
     async def _web_attempt(self, job: Job) -> None:
         """Web research: the pipeline in web.py, its model calls budgeted like a job's."""
         from ai_delegate import web
@@ -593,8 +603,7 @@ class Manager:
         pinned = f"{job.model.split('@', 1)[0]}@{job.machine}"
         deadline = time.monotonic() + job.time_limit_s
         max_out = min(self.cfg.max_output_tokens, job.window // 4)
-        names = {job.model.lower(), pinned.lower(), pinned.split("@", 1)[0].lower()}
-        settings = settings_for(self.cfg, lambda w: w.lower() in names)
+        settings = self._settings(job, pinned)
         extra = dict(settings.params)
         if settings.thinking_budget:
             extra["thinking_budget"] = int(max_out * settings.thinking_budget)

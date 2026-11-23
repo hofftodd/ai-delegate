@@ -56,6 +56,11 @@ class Meter:
     last_prompt: int = 0
     signatures: list[str] = field(default_factory=list)
     stopped: str = ""
+    # The model's request settings (config.yaml models:): extra fields for every call, and
+    # its thinking budget as a share of each call's max_tokens (max_output when unset).
+    extra: dict[str, Any] = field(default_factory=dict)
+    thinking_share: float | None = None
+    max_output: int = 0
 
     def trip(self, reason: str) -> None:
         if not self.stopped:
@@ -205,6 +210,11 @@ class Gateway:
         except ValueError:
             return _error(400, "invalid JSON")
         payload["model"] = meter.model
+        payload.update(meter.extra)
+        if meter.thinking_share:
+            out = payload.get("max_tokens") or payload.get("max_completion_tokens")
+            if out := out or meter.max_output:
+                payload["thinking_budget"] = int(out * meter.thinking_share)
         estimate = estimate_tokens(json.dumps(payload.get("messages", [])))
         if not payload.get("stream"):
             r = await self.client.post(url, headers=headers, json=payload)
