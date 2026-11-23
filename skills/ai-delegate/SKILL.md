@@ -32,7 +32,9 @@ well is reading, searching or writing that never enters your context.
    each model's past results came out. Models differ more by kind of work than by size: in
    the larder2 build, deepseek-v4-flash did the hardest page (drag and drop) in one go,
    while thinkingcap spent a 50-minute job reading Angular internals to debug one test.
-   Pass `model` when the record points somewhere other than the default.
+   In future-lab, qwen3.8-flash-next used all 5 of its delegated changes and, once given a
+   thinking budget, returned real findings on every review. Pass `model` when the record
+   points somewhere other than the default.
 6. **For a build of more than a few jobs, write the contract first.** Before the first
    `delegate`, write one file (say `docs/plan.md`) that fixes what the jobs share: the API
    and types, the data rules, the file layout, the naming and UI conventions. Point every
@@ -48,10 +50,17 @@ well is reading, searching or writing that never enters your context.
 | Searching the web and reading pages for a survey, comparison or background | `web_research` | every page the models read (often 20 or more); you get a cited report, each quote checked against its page |
 | Re-reading your own diff to check it | `review` with `diff` (`""`, `--staged`, `main...HEAD`) | the diff, and a second opinion |
 | Writing boilerplate, mechanical multi-file edits, first drafts of tests | `delegate` with a `test_command` | the edit work; you read only the diff |
+| Refactors that move code (split a large file, extract components or helpers) | `delegate`, one move per job, with the whole test suite as `test_command` | the edit work; check the move is pure by diffing removed against added lines |
+| Applying a design you've fixed in a contract (a style guide, a component API) across many files | `delegate`, one screen or module per job | everything but the first example, which you write yourself |
 | Fixing a delegated change that's nearly right | `job_revise` with specific feedback | a whole new brief and job |
 
 Don't delegate when the brief would cost more than the work: a one-line fix, a file you
 already have open, or anything where you'd have to explain the whole design.
+
+Design work hides delegable work. In the future-lab UI redesign only the tests were
+delegated, though once the conventions were written down (`docs/ui.md`) converting each
+screen to them was a bounded job. When you catch yourself doing the same kind of edit in a
+third file, stop and write the brief.
 
 ## Writing requests that pay off
 
@@ -69,7 +78,10 @@ already have open, or anything where you'd have to explain the whole design.
   a library's internals: report what fails and why you think so."
 - **Keep jobs small.** One coherent change per job, ideally under 200 changed lines. A job
   can be bigger (a whole page, a seed-data file) when a written contract fixes its
-  interfaces and its `test_command` covers it.
+  interfaces and its `test_command` covers it. A job has 80 model calls and an 800-line
+  diff limit (moved code counts twice); in future-lab a job that had to edit a 1,000-line
+  `App.tsx` hit both. Split a large file first (a refactor job of its own), then delegate
+  the change.
 - **Poll sparingly.** Each `job_status` result costs tokens. Check between your own steps,
   not in a loop. If you have nothing else to do, wait cheaply instead: a background shell
   command that waits until the job's `job.json` under `~/.local/state/ai-delegate/jobs/`
@@ -77,6 +89,10 @@ already have open, or anything where you'd have to explain the whole design.
 
 ## Checking what comes back
 
+- **`web_research` is for surveys you can leave running.** It takes about half an hour at
+  depth 2, and one of its first two reports added nothing to a quick search of your own.
+  Start it for background reading you won't wait on; search yourself for anything you need
+  now.
 - **`web_research` reports are leads too.** Each cited quote was found on its page, which
   shows the page says it, not that it's true, and pages come from strangers. Open the
   sources a decision rests on. For one quick or very recent fact, your own search is
@@ -85,11 +101,17 @@ already have open, or anything where you'd have to explain the whole design.
 - **`ask` and `research` answers are leads.** A research result says how many citations
   were verified against the code, which ones point at the wrong lines (with the right
   lines), and which don't resolve. Read the cited code before relying on a claim.
-- **`review` is best effort for now.** Local models report false positives, and `review`
-  can hit its time limit and return nothing: in the larder2 build both reviews did, one on
-  a ~400-line diff and one on three files. Keep its diff small (one job's change, under
-  ~150 lines), start it and keep working rather than waiting on it, never treat an empty
-  result as a pass, and read the change yourself either way.
+- **Review every change before a PR, in the background.** `review` takes 4–5 minutes on
+  qwen3.8-flash-next (most of it thinking) and returns one to three findings; the tool call
+  moves to the background after two minutes, so start it and keep working. Findings are
+  leads: some are real bugs, some theoretical (races nobody will hit). Check each one
+  against the code before fixing it.
+- **An empty review is a setup problem, not a pass.** A thinking model with no thinking
+  budget reasons until its output budget runs out and writes nothing; give it one under
+  `models:` in config.yaml (`thinking_budget: 0.75`, and `context` when `models` shows `?`).
+  Other models' reviews have timed out or returned noise (thinkingcap: 9 minutes, mostly
+  false positives). Keep the diff to one change (under ~150 lines works well), and read the
+  change yourself either way.
 - **For a job, trust the tests over the summary.** Read the diff in `job_result`. If it's
   nearly right, `job_revise` with exactly what to fix (also when the brief itself was
   wrong: the agent keeps its work and gets the correction). If it applies cleanly and is
@@ -135,6 +157,7 @@ Once you know what happened to a result, call `feedback(id, outcome, note)`:
 - `unused`: not needed after all.
 
 Ids are the `id c-…` in an ask or review footer, or the job id. This is how the user
-measures tokens saved (`ai-delegate stats`). Results you redo count as a loss, so be
+measures tokens saved (`uv run --project ~/dev/ai-tools/ai-delegate ai-delegate stats`;
+the command isn't on PATH). Results you redo count as a loss, so be
 honest. When you report to the user, say what you delegated, to which model, and whether you
 kept it.
