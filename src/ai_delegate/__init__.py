@@ -70,6 +70,7 @@ class _TermContext:
 
 
 async def _doctor(server) -> int:  # type: ignore[no-untyped-def]
+    from ai_delegate import outcomes
     from ai_delegate.routing import NoModel, pick
     from ai_delegate.swap import SwapError
 
@@ -91,7 +92,7 @@ async def _doctor(server) -> int:  # type: ignore[no-untyped-def]
     ok = True
     for tool, names in cfg.routes.items():
         try:
-            c = pick(cluster, names)
+            c = pick(cluster, names, ratings=outcomes.ratings(tool))
             print(
                 f"{tool + ':':9} {c.model.id} on {c.model.machine} ({c.why}); list from "
                 f"{cfg.route_source.get(tool, 'defaults')}"

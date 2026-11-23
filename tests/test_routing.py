@@ -75,3 +75,40 @@ def test_swap_names_loaded_variants_without_substituting():
 def test_swap_without_variants_says_nothing_extra(cluster):
     c = pick(cluster, ["big"])
     assert c.load == "swap" and c.variants == [] and "instead" not in c.why
+
+
+def test_a_good_record_ranks_a_model_up(cluster):
+    ratings = [("thinker", "mini", "kept")] * 3 + [("thinker", "mini", "fixed")]
+    c = pick(cluster, ["flint", "thinker"], ratings=ratings)
+    assert c.model.id == "thinker"
+    assert "ranked up by its record (4 of 4 recent results used)" in c.why
+
+
+def test_a_poor_record_ranks_a_model_down(cluster):
+    ratings = [("flint", "studio", "unused")] * 3
+    c = pick(cluster, ["flint", "thinker"], ratings=ratings)
+    assert c.model.id == "thinker" and c.why.startswith("loaded")
+
+
+def test_record_needs_enough_recent_ratings(cluster):
+    # Two ratings are too few; old failures age out of the recent window.
+    assert (
+        pick(cluster, ["flint", "thinker"], ratings=[("flint", "studio", "unused")] * 2).model.id
+        == "flint"
+    )
+    recovered = [("flint", "studio", "unused")] * 4 + [("flint", "studio", "kept")] * 6
+    assert pick(cluster, ["thinker", "flint"], ratings=recovered).model.id == "flint"
+
+
+def test_record_is_per_machine_and_never_beats_loaded(cluster):
+    # flint@mini's record says nothing about the studio copy.
+    ratings = [("flint", "mini", "unused")] * 3
+    assert pick(cluster, ["flint", "thinker"], ratings=ratings).model.id == "flint"
+    # A great record on a model that would need a load still loses to a loaded one.
+    ratings = [("big", "studio", "kept")] * 5
+    assert pick(cluster, ["thinker", "big"], ratings=ratings).model.id == "thinker"
+
+
+def test_named_model_ignores_the_record(cluster):
+    ratings = [("flint", "studio", "unused")] * 5
+    assert pick(cluster, ["thinker"], explicit="flint", ratings=ratings).model.id == "flint"

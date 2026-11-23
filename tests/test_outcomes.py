@@ -94,3 +94,19 @@ def test_track_record_uses_the_most_recent_runs(state):
     rec = outcomes.track_record()
     assert rec["research"] == {"median_s": 600, "runs": 20, "outcomes": {}}
     assert (rec["ask"]["median_s"], rec["ask"]["runs"]) == (4.0, 20)
+
+
+def test_ratings_keep_each_ids_latest_in_time_order(tmp_path, monkeypatch):
+    import json
+
+    from ai_delegate import outcomes
+
+    monkeypatch.setattr(outcomes, "state_dir", lambda: tmp_path)
+    rows = [
+        {"id": "a", "tool": "review", "model": "m", "machine": "x", "outcome": "unused"},
+        {"id": "b", "tool": "review", "model": "m", "machine": "x", "outcome": "kept"},
+        {"id": "c", "tool": "ask", "model": "m", "machine": "x", "outcome": "kept"},
+        {"id": "a", "tool": "review", "model": "m", "machine": "x", "outcome": "fixed"},
+    ]
+    (tmp_path / "feedback.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert outcomes.ratings("review") == [("m", "x", "kept"), ("m", "x", "fixed")]
