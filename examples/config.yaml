@@ -19,6 +19,9 @@ ask:
 review:
   # models: [thinkingcap-qwen3.8-27b, deepseek-v4-flash, flint, qwen3.8-27b]
   timeout_s: 600
+  # A smaller thinking share than the model's (models: below) makes reviews answer
+  # sooner: 0.375 of 32k took 2.5 min instead of 5 on qwen3.8-flash-next.
+  # thinking_budget: 0.375
 
 # Files and diffs sent with one call, in bytes.
 max_input_bytes: 400000

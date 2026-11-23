@@ -104,3 +104,45 @@ def test_model_settings_rejects_bad_values(tmp_path, section, message):
     (tmp_path / "config.yaml").write_text("models:\n  m:\n" + section)
     with pytest.raises(ValueError, match=message):
         config.load(tmp_path / "config.yaml")
+
+
+def test_a_tool_can_set_its_own_thinking_share(tmp_path):
+    from ai_delegate import config
+
+    (tmp_path / "config.yaml").write_text(
+        "review:\n  thinking_budget: 0.375\nmodels:\n  m:\n    thinking_budget: 0.75\n"
+    )
+    cfg = config.load(tmp_path / "config.yaml")
+    assert cfg.tool_thinking == {"review": 0.375}
+    (tmp_path / "config.yaml").write_text("review:\n  thinking_budget: 1.5\n")
+    with pytest.raises(ValueError, match="review.thinking_budget"):
+        config.load(tmp_path / "config.yaml")
+
+
+async def test_run_sends_the_tools_thinking_share(cluster, monkeypatch):
+    from ai_delegate import config
+
+    seen = {}
+
+    class FakeSwap:
+        async def cluster(self):
+            return cluster
+
+        async def chat(self, model, messages, **kw):
+            seen.update(kw)
+            return Reply(text="No findings.", finish="stop")
+
+    class Ctx:
+        async def report_progress(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(server, "swap", FakeSwap())
+    monkeypatch.setattr(server.outcomes, "log_call", lambda *a, **k: None)
+    monkeypatch.setattr(
+        server.cfg, "models", {"flint": config.ModelSettings(context=131072, thinking_budget=0.75)}
+    )
+    monkeypatch.setattr(server.cfg, "tool_thinking", {"review": 0.375})
+    await server.run("review", "sys", "diff", "flint", 0.2, 5, Ctx())
+    assert seen["max_tokens"] == 32768 and seen["extra"] == {"thinking_budget": 12288}
+    await server.run("ask", "sys", "q", "flint", 0.2, 5, Ctx())
+    assert seen["extra"] == {"thinking_budget": 24576}

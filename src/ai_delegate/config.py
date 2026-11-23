@@ -85,6 +85,9 @@ class Config:
     api_key: str = ""
     routes: dict[str, list[str]] = field(default_factory=lambda: dict(DEFAULT_ROUTES))
     timeouts: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
+    # A tool's own thinking budget share (e.g. review: thinking_budget: 0.375), used instead
+    # of the model's for models that have one; a smaller share makes that tool answer sooner.
+    tool_thinking: dict[str, float] = field(default_factory=dict)
     max_input_bytes: int = 400_000  # files and diffs sent with one call
     max_output_tokens: int = 32_768  # cap on a quarter of the model's context
     jobs: Jobs = field(default_factory=Jobs)
@@ -137,6 +140,11 @@ def load(path: Path = CONFIG_PATH, routes_path: Path | None = None) -> Config:
                 cfg.route_source[tool] = "config.yaml"
             if "timeout_s" in section:
                 cfg.timeouts[tool] = float(section["timeout_s"])
+            if section.get("thinking_budget") is not None:
+                share = float(section["thinking_budget"])
+                if not 0 < share < 1:
+                    raise ValueError(f"{path}: {tool}.thinking_budget is a share between 0 and 1")
+                cfg.tool_thinking[tool] = share
         cfg.max_input_bytes = int(raw.get("max_input_bytes", cfg.max_input_bytes))
         cfg.max_output_tokens = int(raw.get("max_output_tokens", cfg.max_output_tokens))
         for name, section in (raw.get("models") or {}).items():
