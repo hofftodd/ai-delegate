@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_delegate import citations, outcomes, pi, sandbox, workspace
-from ai_delegate.config import Config
+from ai_delegate.config import Config, settings_for
 from ai_delegate.gateway import Budget, Gateway, Meter
 from ai_delegate.routing import pick
 from ai_delegate.swap import AiSwap
@@ -248,7 +248,11 @@ class Manager:
             model=choice.model.id,
             machine=choice.model.machine,
             route=choice.why,
-            window=choice.model.ctx or self.cfg.jobs.default_context,
+            window=(
+                settings_for(self.cfg, choice.model.matches).context
+                or choice.model.ctx
+                or self.cfg.jobs.default_context
+            ),
             sandbox=mode,
             test_command=test_command if kind == "change" else None,
             include_uncommitted=include_uncommitted,
@@ -589,6 +593,11 @@ class Manager:
         pinned = f"{job.model.split('@', 1)[0]}@{job.machine}"
         deadline = time.monotonic() + job.time_limit_s
         max_out = min(self.cfg.max_output_tokens, job.window // 4)
+        names = {job.model.lower(), pinned.lower(), pinned.split("@", 1)[0].lower()}
+        settings = settings_for(self.cfg, lambda w: w.lower() in names)
+        extra = dict(settings.params)
+        if settings.thinking_budget:
+            extra["thinking_budget"] = int(max_out * settings.thinking_budget)
         start_tokens = job.new_tokens
 
         def note(msg: str) -> None:
@@ -624,7 +633,12 @@ class Manager:
                 raise web.ResearchError(f"time limit reached ({limit_text})")
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             reply = await self.swap.chat(
-                pinned, messages, max_tokens=max_out, temperature=0.2, deadline_s=min(left, 600)
+                pinned,
+                messages,
+                max_tokens=max_out,
+                temperature=0.2,
+                deadline_s=min(left, 600),
+                extra=extra,
             )
             job.requests += 1
             used_in = reply.prompt_tokens or (len(system) + len(user)) // 4
