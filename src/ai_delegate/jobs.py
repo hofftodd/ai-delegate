@@ -237,7 +237,7 @@ class Manager:
         cluster = await self.swap.cluster()
         route = {"research": "research", "web": "web_research"}.get(kind, "delegate")
         candidates = self.cfg.routes.get(route) or self.cfg.routes.get("delegate", [])
-        choice = pick(cluster, candidates, model)
+        choice = pick(cluster, candidates, model, outcomes.ratings(route))
 
         job = Job(
             id=time.strftime("%m%d-%H%M%S-") + secrets.token_hex(2),

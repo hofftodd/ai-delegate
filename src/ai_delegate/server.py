@@ -162,7 +162,7 @@ async def run(
     """native: (tokens, basis), what the caller would have read to do this itself."""
     try:
         cluster = await swap.cluster()
-        choice = pick(cluster, cfg.routes.get(tool, []), model)
+        choice = pick(cluster, cfg.routes.get(tool, []), model, outcomes.ratings(tool))
     except (SwapError, NoModel) as e:
         return f"Error: {e}"
     m = choice.model
@@ -324,7 +324,11 @@ async def capabilities() -> str:
     record = outcomes.track_record()
     for tool, use in TOOL_USES.items():
         try:
-            c = pick(cluster, cfg.routes.get(tool) or cfg.routes.get("delegate", []))
+            c = pick(
+                cluster,
+                cfg.routes.get(tool) or cfg.routes.get("delegate", []),
+                ratings=outcomes.ratings(tool),
+            )
             via = f"{c.model.name}@{c.model.machine}"
             when = (
                 "loaded"

@@ -113,6 +113,17 @@ def record(item_id: str, outcome: str, note: str = "") -> dict[str, Any]:
     return rec
 
 
+def ratings(tool: str) -> list[tuple[str, str, str]]:
+    """The rated results of one tool, oldest first: (model, machine, outcome), one per id
+    (its latest rating). Routing reads them to rank a model by its record."""
+    latest: dict[str, dict[str, Any]] = {}
+    for r in _read("feedback.jsonl"):
+        if r.get("id") and r.get("tool") == tool:
+            latest.pop(r["id"], None)
+            latest[r["id"]] = r
+    return [(r.get("model", ""), r.get("machine", ""), r["outcome"]) for r in latest.values()]
+
+
 def stats() -> str:
     calls = _read("calls.jsonl")
     fb = {r["id"]: r for r in _read("feedback.jsonl") if r.get("id")}  # the last one wins
